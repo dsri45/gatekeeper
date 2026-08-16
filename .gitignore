@@ -1,0 +1,18 @@
+# Compiled binaries
+/bin/
+/gateway.exe
+
+# Test and coverage output
+*.test
+coverage.out
+
+# Local configuration and secrets
+.env
+config.local.yaml
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
