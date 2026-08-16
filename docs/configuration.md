@@ -153,8 +153,10 @@ conditions is present:
 - a timeout or duration is invalid;
 - the Redis database number is negative;
 - the failure policy is unsupported;
+- no backends are defined;
 - a backend name is empty;
 - a backend URL is not a valid absolute HTTP URL;
+- no routes are defined;
 - a route name is empty or duplicated;
 - a route method is missing or unsupported;
 - a path prefix does not begin with `/`;
@@ -168,4 +170,3 @@ conditions is present:
 
 Validation errors will identify the field that failed so configuration problems
 can be corrected without debugging the running server.
-
