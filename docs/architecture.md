@@ -17,15 +17,32 @@ The project is designed to demonstrate:
 
 ## System context
 
-```mermaid
-flowchart LR
-    C["Client"] -->|"HTTP request + optional X-API-Key"| G["Gatekeeper"]
-    G -->|"Atomic token-bucket check"| R["Redis"]
-    R -->|"Decision + bucket state"| G
-    G -->|"Allowed requests only"| B["Backend service"]
-    B -->|"HTTP response"| G
-    G -->|"Backend response or HTTP 429"| C
-    P["Prometheus-compatible collector"] -->|"GET /metrics"| G
+```text
+┌────────────┐     HTTP request      ┌────────────────────┐
+│   Client   │ ─────────────────────▶│     Gatekeeper     │
+└────────────┘                       └─────────┬──────────┘
+      ▲                                       │
+      │                              atomic token-bucket check
+      │                                       │
+      │                                       ▼
+      │                              ┌────────────────────┐
+      │                              │       Redis        │
+      │                              └─────────┬──────────┘
+      │                                       │ decision + bucket state
+      │                                       ▼
+      │                              ┌────────────────────┐
+      │  backend response or 429     │     Gatekeeper     │
+      └──────────────────────────────┤      decision      │
+                                     └─────────┬──────────┘
+                                               │ allowed requests only
+                                               ▼
+                                     ┌────────────────────┐
+                                     │  Backend service   │
+                                     └────────────────────┘
+
+┌───────────────────────┐    GET /metrics    ┌────────────────────┐
+│ Monitoring collector  │ ──────────────────▶│     Gatekeeper     │
+└───────────────────────┘                    └────────────────────┘
 ```
 
 Redis is the source of truth for rate-limit state. Multiple Gatekeeper
@@ -52,24 +69,48 @@ multiply a client's allowance.
    backend. Gatekeeper then relays the backend response to the client.
 10. Gatekeeper records structured logs and request metrics.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant G as Gatekeeper
-    participant R as Redis
-    participant B as Backend
-
-    C->>G: HTTP request
-    G->>G: Match route and identify client
-    G->>R: Atomic Lua token-bucket operation
-    R-->>G: Decision, remaining tokens, retry delay
-    alt Allowed
-        G->>B: Proxy request
-        B-->>G: Backend response
-        G-->>C: Relay backend response
-    else Rejected
-        G-->>C: 429 Too Many Requests
-    end
+```text
+┌───────────────────────┐
+│    Client request     │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐
+│ Match route and       │
+│ identify client       │
+└───────────┬───────────┘
+            │
+            ▼
+┌───────────────────────┐      atomic Lua operation      ┌─────────────┐
+│      Gatekeeper       │ ──────────────────────────────▶│    Redis    │
+└───────────┬───────────┘ ◀──────────────────────────────└─────────────┘
+            │              decision + bucket state
+            ▼
+      ┌─────────────┐
+      │   Allowed?  │
+      └──────┬──────┘
+             │
+        ┌────┴────┐
+        │         │
+      yes         no
+        │         │
+        ▼         ▼
+┌──────────────┐  ┌────────────────────────┐
+│ Proxy to     │  │ Return HTTP 429        │
+│ backend      │  │ Backend is untouched   │
+└──────┬───────┘  └───────────┬────────────┘
+       │                       │
+       ▼                       │
+┌──────────────┐               │
+│ Relay backend│               │
+│ response     │               │
+└──────┬───────┘               │
+       │                       │
+       └───────────┬───────────┘
+                   ▼
+          ┌─────────────────┐
+          │ Client response │
+          └─────────────────┘
 ```
 
 ## Component responsibilities
