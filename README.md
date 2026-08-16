@@ -11,6 +11,7 @@ Initial project scaffold. Implementation is in progress.
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
 
 ## Requirements
 
