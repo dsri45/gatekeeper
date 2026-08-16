@@ -8,6 +8,10 @@ proxying allowed HTTP requests to backend services.
 
 Initial project scaffold. Implementation is in progress.
 
+## Documentation
+
+- [Architecture](docs/architecture.md)
+
 ## Requirements
 
 - Go 1.26 or newer
@@ -18,4 +22,3 @@ Initial project scaffold. Implementation is in progress.
 ```powershell
 go run ./cmd/gateway
 ```
-
