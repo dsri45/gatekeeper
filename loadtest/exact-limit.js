@@ -10,7 +10,7 @@ const rejected = new Counter('gatekeeper_rejected');
 const unexpected = new Counter('gatekeeper_unexpected');
 const gatewayDuration = new Trend('gatekeeper_duration', true);
 
-http.setResponseCallback(http.expectedStatuses(200, 429));
+http.setResponseCallback(http.expectedStatuses(200, 204, 429));
 
 export const options = {
   scenarios: {

@@ -11,7 +11,7 @@ const allowed = new Counter('gatekeeper_allowed');
 const unexpected = new Counter('gatekeeper_unexpected');
 const allowedDuration = new Trend('gatekeeper_allowed_duration', true);
 
-http.setResponseCallback(http.expectedStatuses(200));
+http.setResponseCallback(http.expectedStatuses(200, 204));
 
 export const options = {
   scenarios: {

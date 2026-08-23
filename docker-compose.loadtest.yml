@@ -12,6 +12,7 @@ services:
       MOCK_BACKEND_URL: http://mock-backend:8081
     volumes:
       - ./loadtest:/scripts:ro
+      - ./loadtest/results:/results
     depends_on:
       gateway:
         condition: service_healthy

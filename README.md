@@ -22,7 +22,7 @@ completion log without client identifiers or query data.
 
 - Go 1.26 or newer
 - A reachable Redis server for rate-limit enforcement
-- Docker and Docker Compose once the containerized demo stack is added
+- Docker Desktop with Docker Compose for the complete demo stack and load tests
 
 ## Run locally
 
@@ -152,19 +152,54 @@ Prove that a 100-token bucket allows exactly 100 of 1000 concurrent requests:
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml run --rm k6 run /scripts/exact-limit.js
 ```
 
-Measure the complete allowed-request path with 100 virtual users for 30 seconds:
+Measure the complete allowed-request path with 20 virtual users for 30 seconds:
 
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml run --rm k6 run /scripts/throughput.js
 ```
 
-The throughput workload can be adjusted with `-e VUS=200` or
+The throughput workload defaults to the stable local benchmark described below.
+It can be adjusted with `-e VUS=50` or
 `-e DURATION=60s` before the `k6` service name. Stop the benchmark stack using
 the same two Compose files:
 
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml down
 ```
+
+## Load-test results
+
+These results were measured locally on August 23, 2026 using Docker Desktop
+4.87.0, Docker Engine 29.7.2, and k6 2.2.0. Gateway request logging remained
+enabled. Each 30-second throughput trial used 20 concurrent virtual users and a
+fresh Compose stack followed by a five-second warm-up. The table reports the
+complete path through Gatekeeper, Redis, and the mock backend.
+
+| Trial | Allowed requests | Throughput | p50 | p95 | p99 | Unexpected responses |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 164,383 | 5,478 req/s | 3.39 ms | 5.77 ms | 7.36 ms | 0 |
+| 2 | 166,302 | 5,542 req/s | 3.35 ms | 5.72 ms | 7.16 ms | 0 |
+| 3 | 167,238 | 5,573 req/s | 3.34 ms | 5.68 ms | 7.17 ms | 0 |
+| **Median** | **166,302** | **5,542 req/s** | **3.35 ms** | **5.72 ms** | **7.17 ms** | **0** |
+
+The backend counter equaled the number of allowed requests in every trial,
+showing that successful gateway responses represented completed proxy traffic.
+These are local development-machine results, not production capacity claims.
+
+The separate concurrency test sent 1,000 requests at once to a fresh bucket
+containing 100 tokens. It allowed exactly 100 requests, rejected exactly 900
+with HTTP 429, produced no unexpected responses, and recorded exactly 100
+requests at the backend. This demonstrates that the Redis Lua script performs
+the token check and update atomically under concurrent access.
+
+Saved machine-readable k6 summaries are available in
+[`loadtest/results`](loadtest/results).
+
+## Resume bullet
+
+> Built a distributed rate-limiting API gateway in Go with Redis-backed atomic
+> token buckets, sustaining 5,542 requests/second at 7.17 ms p99 latency in a
+> three-run local Docker benchmark with zero unexpected responses.
 
 The mock backend listens on `http://localhost:8081`. Its application endpoints
 are `GET /api/search` and `POST /api/upload`. Test counters are available at
