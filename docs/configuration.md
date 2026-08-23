@@ -13,6 +13,9 @@ example.
 server:
   address: ":8080"
   read_header_timeout: "5s"
+  read_timeout: "30s"
+  write_timeout: "30s"
+  idle_timeout: "60s"
   shutdown_timeout: "10s"
 ```
 
@@ -20,6 +23,9 @@ server:
 | --- | --- | --- | --- |
 | `address` | No | `:8080` | Network address used by the HTTP server |
 | `read_header_timeout` | No | `5s` | Maximum time allowed for reading request headers |
+| `read_timeout` | No | `30s` | Maximum time allowed for reading a complete request |
+| `write_timeout` | No | `30s` | Maximum time allowed for writing a response |
+| `idle_timeout` | No | `60s` | Maximum idle time for a reusable client connection |
 | `shutdown_timeout` | No | `10s` | Maximum time allowed for active requests to finish during shutdown |
 
 Duration values use Go duration syntax. Common units include `ms` for
@@ -136,6 +142,9 @@ deployment concern that can be added without changing the route model.
 | --- | --- |
 | Server address | `:8080` |
 | Header-read timeout | `5s` |
+| Request-read timeout | `30s` |
+| Response-write timeout | `30s` |
+| Idle connection timeout | `60s` |
 | Shutdown timeout | `10s` |
 | Redis database | `0` |
 | Redis operation timeout | `100ms` |

@@ -6,7 +6,8 @@ proxying allowed HTTP requests to backend services.
 
 ## Status
 
-Initial project scaffold. Implementation is in progress.
+The functional HTTP gateway and mock backend are implemented. Distributed Redis
+rate limiting is the next milestone.
 
 ## Documentation
 
@@ -18,16 +19,24 @@ Initial project scaffold. Implementation is in progress.
 - Go 1.26 or newer
 - Docker and Docker Compose (required once Redis and the demo stack are added)
 
-## Run the current scaffold
+## Run locally
 
-```powershell
-go run ./cmd/gateway
-```
-
-## Run the mock backend
+Start the mock backend in one terminal:
 
 ```powershell
 go run ./cmd/mock-backend
+```
+
+Start Gatekeeper in a second terminal:
+
+```powershell
+go run ./cmd/gateway -config config/config.example.yaml
+```
+
+Send a request through Gatekeeper:
+
+```powershell
+curl.exe -H "X-API-Key: demo-client" "http://localhost:8080/api/search?q=redis"
 ```
 
 The mock backend listens on `http://localhost:8081`. Its application endpoints

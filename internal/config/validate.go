@@ -44,6 +44,15 @@ func validateServer(server ServerConfig) error {
 	if server.ReadHeaderTimeout.Duration <= 0 {
 		return fmt.Errorf("server.read_header_timeout must be greater than zero")
 	}
+	if server.ReadTimeout.Duration <= 0 {
+		return fmt.Errorf("server.read_timeout must be greater than zero")
+	}
+	if server.WriteTimeout.Duration <= 0 {
+		return fmt.Errorf("server.write_timeout must be greater than zero")
+	}
+	if server.IdleTimeout.Duration <= 0 {
+		return fmt.Errorf("server.idle_timeout must be greater than zero")
+	}
 	if server.ShutdownTimeout.Duration <= 0 {
 		return fmt.Errorf("server.shutdown_timeout must be greater than zero")
 	}

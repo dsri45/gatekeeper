@@ -10,6 +10,9 @@ const (
 const (
 	defaultServerAddress      = ":8080"
 	defaultReadHeaderTimeout  = 5 * time.Second
+	defaultReadTimeout        = 30 * time.Second
+	defaultWriteTimeout       = 30 * time.Second
+	defaultIdleTimeout        = 60 * time.Second
 	defaultShutdownTimeout    = 10 * time.Second
 	defaultRedisDatabase      = 0
 	defaultRedisTimeout       = 100 * time.Millisecond
@@ -28,6 +31,9 @@ type Config struct {
 type ServerConfig struct {
 	Address           string   `yaml:"address"`
 	ReadHeaderTimeout Duration `yaml:"read_header_timeout"`
+	ReadTimeout       Duration `yaml:"read_timeout"`
+	WriteTimeout      Duration `yaml:"write_timeout"`
+	IdleTimeout       Duration `yaml:"idle_timeout"`
 	ShutdownTimeout   Duration `yaml:"shutdown_timeout"`
 }
 
@@ -71,6 +77,9 @@ func defaults() Config {
 		Server: ServerConfig{
 			Address:           defaultServerAddress,
 			ReadHeaderTimeout: NewDuration(defaultReadHeaderTimeout),
+			ReadTimeout:       NewDuration(defaultReadTimeout),
+			WriteTimeout:      NewDuration(defaultWriteTimeout),
+			IdleTimeout:       NewDuration(defaultIdleTimeout),
 			ShutdownTimeout:   NewDuration(defaultShutdownTimeout),
 		},
 		Redis: RedisConfig{

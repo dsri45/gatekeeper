@@ -50,6 +50,15 @@ func TestDecodeAppliesDefaultsAndNormalizesMethod(t *testing.T) {
 	if cfg.Server.ReadHeaderTimeout.Duration != defaultReadHeaderTimeout {
 		t.Errorf("ReadHeaderTimeout = %s, want %s", cfg.Server.ReadHeaderTimeout.Duration, defaultReadHeaderTimeout)
 	}
+	if cfg.Server.ReadTimeout.Duration != defaultReadTimeout {
+		t.Errorf("ReadTimeout = %s, want %s", cfg.Server.ReadTimeout.Duration, defaultReadTimeout)
+	}
+	if cfg.Server.WriteTimeout.Duration != defaultWriteTimeout {
+		t.Errorf("WriteTimeout = %s, want %s", cfg.Server.WriteTimeout.Duration, defaultWriteTimeout)
+	}
+	if cfg.Server.IdleTimeout.Duration != defaultIdleTimeout {
+		t.Errorf("IdleTimeout = %s, want %s", cfg.Server.IdleTimeout.Duration, defaultIdleTimeout)
+	}
 	if cfg.Server.ShutdownTimeout.Duration != defaultShutdownTimeout {
 		t.Errorf("ShutdownTimeout = %s, want %s", cfg.Server.ShutdownTimeout.Duration, defaultShutdownTimeout)
 	}
@@ -139,11 +148,32 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 			wantErr: "server.address",
 		},
 		{
-			name: "non-positive read timeout",
+			name: "non-positive header read timeout",
 			mutate: func(cfg *Config) {
 				cfg.Server.ReadHeaderTimeout = NewDuration(0)
 			},
 			wantErr: "server.read_header_timeout",
+		},
+		{
+			name: "non-positive request read timeout",
+			mutate: func(cfg *Config) {
+				cfg.Server.ReadTimeout = NewDuration(0)
+			},
+			wantErr: "server.read_timeout",
+		},
+		{
+			name: "non-positive write timeout",
+			mutate: func(cfg *Config) {
+				cfg.Server.WriteTimeout = NewDuration(0)
+			},
+			wantErr: "server.write_timeout",
+		},
+		{
+			name: "non-positive idle timeout",
+			mutate: func(cfg *Config) {
+				cfg.Server.IdleTimeout = NewDuration(0)
+			},
+			wantErr: "server.idle_timeout",
 		},
 		{
 			name: "non-positive shutdown timeout",
