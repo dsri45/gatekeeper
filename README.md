@@ -89,6 +89,55 @@ Run it on port `8081`:
 docker run --rm --name gatekeeper-mock-backend -p 8081:8081 gatekeeper-mock-backend:local
 ```
 
+## Run the complete stack
+
+Build and start Gatekeeper, Redis, and the mock backend:
+
+```powershell
+docker compose up --build --detach
+```
+
+Inspect service health:
+
+```powershell
+docker compose ps
+curl.exe "http://localhost:8080/ready"
+```
+
+Stop and remove the Compose containers and private network:
+
+```powershell
+docker compose down
+```
+
+## Run the full-stack integration test
+
+With the Compose stack running, enable the opt-in Go integration test:
+
+```powershell
+$env:GATEKEEPER_INTEGRATION = "1"
+go test -v ./tests/integration
+Remove-Item Env:GATEKEEPER_INTEGRATION
+```
+
+The test gives a unique client five upload tokens and sends six requests. It
+requires five `202 Accepted` responses followed by one `429 Too Many Requests`,
+then confirms that the mock backend received exactly five requests. It also
+checks rate-limit headers, Redis-aware readiness, and Prometheus metrics.
+
+To demonstrate the configured fail-open policy with the stack still running:
+
+```powershell
+docker compose stop redis
+curl.exe "http://localhost:8080/ready"
+curl.exe -H "X-API-Key: fail-open-demo" "http://localhost:8080/api/search?q=redis-down"
+docker compose logs gateway
+docker compose up --detach --wait redis
+```
+
+Readiness reports `degraded`, while the application request still reaches the
+backend. The gateway log marks the request as `fail_open` with a Redis error.
+
 The mock backend listens on `http://localhost:8081`. Its application endpoints
 are `GET /api/search` and `POST /api/upload`. Test counters are available at
 `GET /_mock/stats` and can be cleared with `POST /_mock/reset`.

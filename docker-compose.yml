@@ -1,0 +1,45 @@
+services:
+  redis:
+    image: redis:8.10.0-alpine3.23
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+    networks:
+      - gatekeeper
+
+  mock-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-backend
+    image: gatekeeper-mock-backend:local
+    read_only: true
+    ports:
+      - "8081:8081"
+    networks:
+      - gatekeeper
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gatekeeper:local
+    command: ["-config", "/app/config/config.docker.yaml"]
+    read_only: true
+    volumes:
+      - ./config/config.docker.yaml:/app/config/config.docker.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-backend:
+        condition: service_healthy
+    networks:
+      - gatekeeper
+
+networks:
+  gatekeeper:
+    driver: bridge
