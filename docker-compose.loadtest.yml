@@ -1,0 +1,19 @@
+services:
+  gateway:
+    command: ["-config", "/app/config/config.loadtest.yaml"]
+    volumes:
+      - ./config/config.loadtest.yaml:/app/config/config.loadtest.yaml:ro
+
+  k6:
+    image: grafana/k6:2.2.0
+    profiles: ["loadtest"]
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      MOCK_BACKEND_URL: http://mock-backend:8081
+    volumes:
+      - ./loadtest:/scripts:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - gatekeeper

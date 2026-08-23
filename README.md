@@ -138,6 +138,34 @@ docker compose up --detach --wait redis
 Readiness reports `degraded`, while the application request still reaches the
 backend. The gateway log marks the request as `fail_open` with a Redis error.
 
+## Run the load tests
+
+Start the stack with the deterministic load-test configuration:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up --build --detach --wait
+```
+
+Prove that a 100-token bucket allows exactly 100 of 1000 concurrent requests:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml run --rm k6 run /scripts/exact-limit.js
+```
+
+Measure the complete allowed-request path with 100 virtual users for 30 seconds:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml run --rm k6 run /scripts/throughput.js
+```
+
+The throughput workload can be adjusted with `-e VUS=200` or
+`-e DURATION=60s` before the `k6` service name. Stop the benchmark stack using
+the same two Compose files:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml down
+```
+
 The mock backend listens on `http://localhost:8081`. Its application endpoints
 are `GET /api/search` and `POST /api/upload`. Test counters are available at
 `GET /_mock/stats` and can be cleared with `POST /_mock/reset`.
