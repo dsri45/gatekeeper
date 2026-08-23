@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.26.6-alpine3.24 AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/mock-backend ./cmd/mock-backend
+COPY internal/mockbackend ./internal/mockbackend
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/mock-backend \
+    ./cmd/mock-backend
+
+FROM alpine:3.24.1 AS runtime
+
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S mockbackend \
+    && adduser -S -D -H -u 10001 -G mockbackend mockbackend
+
+WORKDIR /app
+
+COPY --from=build --chown=mockbackend:mockbackend /out/mock-backend /usr/local/bin/mock-backend
+
+USER mockbackend
+
+EXPOSE 8081
+
+HEALTHCHECK --interval=10s --timeout=2s --start-period=5s --retries=3 \
+    CMD wget -q -O - http://127.0.0.1:8081/health > /dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/mock-backend"]

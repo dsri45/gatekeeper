@@ -60,6 +60,35 @@ curl.exe "http://localhost:8080/ready"
 When Redis is unavailable, readiness reports `degraded` with HTTP 200 under
 `fail_open`, or `not_ready` with HTTP 503 under `fail_closed`.
 
+## Build the gateway image
+
+Build the multi-stage, non-root gateway container image:
+
+```powershell
+docker build -t gatekeeper:local .
+```
+
+Run the standalone image to inspect its health endpoint:
+
+```powershell
+docker run --rm --name gatekeeper -p 8080:8080 gatekeeper:local
+```
+
+The full Redis and mock-backend network is added through Docker Compose rather
+than the standalone container command.
+
+Build the mock-backend image from its separate Dockerfile:
+
+```powershell
+docker build -f Dockerfile.mock-backend -t gatekeeper-mock-backend:local .
+```
+
+Run it on port `8081`:
+
+```powershell
+docker run --rm --name gatekeeper-mock-backend -p 8081:8081 gatekeeper-mock-backend:local
+```
+
 The mock backend listens on `http://localhost:8081`. Its application endpoints
 are `GET /api/search` and `POST /api/upload`. Test counters are available at
 `GET /_mock/stats` and can be cleared with `POST /_mock/reset`.
