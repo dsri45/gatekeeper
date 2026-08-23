@@ -20,6 +20,10 @@ type scriptRunner interface {
 	Run(context.Context, []string, ...interface{}) (interface{}, error)
 }
 
+type pinger interface {
+	Ping(context.Context) error
+}
+
 type redisScriptRunner struct {
 	client *redis.Client
 	script *redis.Script
@@ -29,9 +33,18 @@ func (r redisScriptRunner) Run(ctx context.Context, keys []string, args ...inter
 	return r.script.Run(ctx, r.client, keys, args...).Result()
 }
 
+type redisPinger struct {
+	client *redis.Client
+}
+
+func (p redisPinger) Ping(ctx context.Context) error {
+	return p.client.Ping(ctx).Err()
+}
+
 // RedisLimiter stores token buckets in Redis and updates them atomically.
 type RedisLimiter struct {
 	runner    scriptRunner
+	pinger    pinger
 	client    *redis.Client
 	timeout   time.Duration
 	keyPrefix string
@@ -56,10 +69,25 @@ func NewRedis(cfg config.RedisConfig) (*RedisLimiter, error) {
 
 	return &RedisLimiter{
 		runner:    redisScriptRunner{client: client, script: redis.NewScript(tokenBucketScript)},
+		pinger:    redisPinger{client: client},
 		client:    client,
 		timeout:   cfg.OperationTimeout.Duration,
 		keyPrefix: "gatekeeper:bucket:",
 	}, nil
+}
+
+// Ping verifies that Redis can accept commands within the operation timeout.
+func (l *RedisLimiter) Ping(ctx context.Context) error {
+	if l == nil || l.pinger == nil {
+		return errors.New("redis limiter is not initialized")
+	}
+
+	operationContext, cancel := context.WithTimeout(ctx, l.timeout)
+	defer cancel()
+	if err := l.pinger.Ping(operationContext); err != nil {
+		return fmt.Errorf("ping Redis: %w", err)
+	}
+	return nil
 }
 
 // Check atomically refills a bucket and consumes one token when available.

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,8 +18,14 @@ type Gateway struct {
 	matcher       *RouteMatcher
 	proxies       *ProxyRegistry
 	limiter       limiter.Limiter
+	readiness     ReadinessChecker
 	failurePolicy string
 	metrics       Metrics
+}
+
+// ReadinessChecker verifies whether the rate-limit dependency is available.
+type ReadinessChecker interface {
+	Ping(context.Context) error
 }
 
 // Metrics records bounded-label gateway measurements and serves them to Prometheus.
@@ -29,12 +36,20 @@ type Metrics interface {
 }
 
 // New validates configuration and creates a ready-to-serve Gateway.
-func New(cfg config.Config, requestLimiter limiter.Limiter, applicationMetrics Metrics) (*Gateway, error) {
+func New(
+	cfg config.Config,
+	requestLimiter limiter.Limiter,
+	readiness ReadinessChecker,
+	applicationMetrics Metrics,
+) (*Gateway, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate gateway configuration: %w", err)
 	}
 	if requestLimiter == nil {
 		return nil, fmt.Errorf("rate limiter is required")
+	}
+	if readiness == nil {
+		return nil, fmt.Errorf("readiness checker is required")
 	}
 	if applicationMetrics == nil {
 		return nil, fmt.Errorf("metrics recorder is required")
@@ -49,6 +64,7 @@ func New(cfg config.Config, requestLimiter limiter.Limiter, applicationMetrics M
 		NewRouteMatcher(cfg.Routes),
 		proxies,
 		requestLimiter,
+		readiness,
 		cfg.Redis.FailurePolicy,
 		applicationMetrics,
 	), nil
@@ -58,6 +74,7 @@ func newGateway(
 	matcher *RouteMatcher,
 	proxies *ProxyRegistry,
 	requestLimiter limiter.Limiter,
+	readiness ReadinessChecker,
 	failurePolicy string,
 	applicationMetrics Metrics,
 ) *Gateway {
@@ -65,6 +82,7 @@ func newGateway(
 		matcher:       matcher,
 		proxies:       proxies,
 		limiter:       requestLimiter,
+		readiness:     readiness,
 		failurePolicy: failurePolicy,
 		metrics:       applicationMetrics,
 	}
@@ -167,6 +185,22 @@ func (g *Gateway) handleInternal(w http.ResponseWriter, request *http.Request) b
 		}{Status: "healthy"})
 		return true
 	}
+	if path == "/ready" {
+		if request.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeGatewayError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return true
+		}
+
+		if err := g.readiness.Ping(request.Context()); err == nil {
+			writeReadiness(w, http.StatusOK, "ready", "available")
+		} else if g.failurePolicy == config.FailurePolicyOpen {
+			writeReadiness(w, http.StatusOK, "degraded", "unavailable")
+		} else {
+			writeReadiness(w, http.StatusServiceUnavailable, "not_ready", "unavailable")
+		}
+		return true
+	}
 	if path == "/metrics" {
 		if request.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -186,6 +220,13 @@ func (g *Gateway) handleInternal(w http.ResponseWriter, request *http.Request) b
 	}
 
 	return false
+}
+
+func writeReadiness(w http.ResponseWriter, status int, state, redisState string) {
+	writeGatewayJSON(w, status, struct {
+		Status string `json:"status"`
+		Redis  string `json:"redis"`
+	}{Status: state, Redis: redisState})
 }
 
 func hasInternalPrefix(path string, prefix string) bool {

@@ -23,6 +23,16 @@ type fakeLimiter struct {
 	requests []limiter.CheckRequest
 }
 
+type fakeReadiness struct {
+	err   error
+	calls atomic.Int64
+}
+
+func (f *fakeReadiness) Ping(context.Context) error {
+	f.calls.Add(1)
+	return f.err
+}
+
 type metricObservation struct {
 	route  string
 	result string
@@ -181,6 +191,7 @@ func TestGatewayHandlesMissingPreparedBackend(t *testing.T) {
 		matcher,
 		proxies,
 		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
+		&fakeReadiness{},
 		config.FailurePolicyOpen,
 		&fakeMetrics{},
 	)
@@ -213,7 +224,7 @@ func TestGatewayHealthAndReservedPathsNeverReachBackend(t *testing.T) {
 		t.Errorf("health body = %q", health.Body.String())
 	}
 
-	for _, path := range []string{"/health/details", "/ready", "/ready/details", "/metrics/details"} {
+	for _, path := range []string{"/health/details", "/ready/details", "/metrics/details"} {
 		response := httptest.NewRecorder()
 		gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusNotFound {
@@ -240,6 +251,98 @@ func TestGatewayHealthRequiresGET(t *testing.T) {
 	}
 	if response.Header().Get("Allow") != http.MethodGet {
 		t.Errorf("Allow = %q, want GET", response.Header().Get("Allow"))
+	}
+}
+
+func TestGatewayReadinessReflectsRedisAndFailurePolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		redisError error
+		policy     string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "Redis available",
+			policy:     config.FailurePolicyOpen,
+			wantStatus: http.StatusOK,
+			wantBody:   "{\"status\":\"ready\",\"redis\":\"available\"}\n",
+		},
+		{
+			name:       "fail open is degraded but ready",
+			redisError: errors.New("unavailable"),
+			policy:     config.FailurePolicyOpen,
+			wantStatus: http.StatusOK,
+			wantBody:   "{\"status\":\"degraded\",\"redis\":\"unavailable\"}\n",
+		},
+		{
+			name:       "fail closed is not ready",
+			redisError: errors.New("unavailable"),
+			policy:     config.FailurePolicyClosed,
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "{\"status\":\"not_ready\",\"redis\":\"unavailable\"}\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var backendCalls atomic.Int64
+			requestLimiter := &fakeLimiter{decision: limiter.Decision{Allowed: true}}
+			readiness := &fakeReadiness{err: test.redisError}
+			gateway := testGatewayWithReadiness(
+				t,
+				countingTransport(&backendCalls),
+				requestLimiter,
+				readiness,
+				test.policy,
+			)
+
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ready", nil))
+
+			if response.Code != test.wantStatus {
+				t.Errorf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+			if response.Body.String() != test.wantBody {
+				t.Errorf("body = %q, want %q", response.Body.String(), test.wantBody)
+			}
+			if readiness.calls.Load() != 1 {
+				t.Errorf("readiness calls = %d, want 1", readiness.calls.Load())
+			}
+			if len(requestLimiter.requests) != 0 {
+				t.Errorf("limiter requests = %d, want 0", len(requestLimiter.requests))
+			}
+			if backendCalls.Load() != 0 {
+				t.Errorf("backend calls = %d, want 0", backendCalls.Load())
+			}
+		})
+	}
+}
+
+func TestGatewayReadinessRequiresGET(t *testing.T) {
+	t.Parallel()
+
+	readiness := &fakeReadiness{}
+	gateway := testGatewayWithReadiness(
+		t,
+		countingTransport(new(atomic.Int64)),
+		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
+		readiness,
+		config.FailurePolicyOpen,
+	)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/ready", nil))
+
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d", response.Code, http.StatusMethodNotAllowed)
+	}
+	if response.Header().Get("Allow") != http.MethodGet {
+		t.Errorf("Allow = %q, want GET", response.Header().Get("Allow"))
+	}
+	if readiness.calls.Load() != 0 {
+		t.Errorf("readiness calls = %d, want 0", readiness.calls.Load())
 	}
 }
 
@@ -500,6 +603,7 @@ func testGateway(
 		NewRouteMatcher(routes),
 		registry,
 		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
+		&fakeReadiness{},
 		config.FailurePolicyOpen,
 		&fakeMetrics{},
 	)
@@ -520,6 +624,7 @@ func testGatewayWithLimiter(
 		NewRouteMatcher(routes),
 		registry,
 		requestLimiter,
+		&fakeReadiness{},
 		failurePolicy,
 		&fakeMetrics{},
 	)
@@ -541,8 +646,29 @@ func testGatewayWithDependencies(
 		NewRouteMatcher(routes),
 		registry,
 		requestLimiter,
+		&fakeReadiness{},
 		failurePolicy,
 		applicationMetrics,
+	)
+}
+
+func testGatewayWithReadiness(
+	t *testing.T,
+	transport http.RoundTripper,
+	requestLimiter limiter.Limiter,
+	readiness ReadinessChecker,
+	failurePolicy string,
+) *Gateway {
+	t.Helper()
+
+	registry := mustProxyRegistry(t, testBackends(), transport)
+	return newGateway(
+		NewRouteMatcher([]config.RouteConfig{testRoute("catch-all", http.MethodGet, "/", 10)}),
+		registry,
+		requestLimiter,
+		readiness,
+		failurePolicy,
+		&fakeMetrics{},
 	)
 }
 

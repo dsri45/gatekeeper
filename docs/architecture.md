@@ -237,7 +237,7 @@ testable rather than accidental.
 | Endpoint | Purpose | Dependency behavior |
 | --- | --- | --- |
 | `GET /health` | Confirms the process is alive | Does not depend on Redis or a backend |
-| `GET /ready` | Reports readiness for normal traffic | Includes Redis connectivity in its status |
+| `GET /ready` | Reports readiness for normal traffic | Pings Redis; reports degraded with HTTP 200 for fail-open or HTTP 503 for fail-closed |
 | `GET /metrics` | Exposes Prometheus-format metrics | Served directly by Gatekeeper |
 
 Internal endpoints bypass normal proxy routing and application rate-limit

@@ -49,6 +49,16 @@ Inspect Prometheus metrics:
 curl.exe "http://localhost:8080/metrics"
 ```
 
+Check liveness or Redis-aware readiness:
+
+```powershell
+curl.exe "http://localhost:8080/health"
+curl.exe "http://localhost:8080/ready"
+```
+
+When Redis is unavailable, readiness reports `degraded` with HTTP 200 under
+`fail_open`, or `not_ready` with HTTP 503 under `fail_closed`.
+
 The mock backend listens on `http://localhost:8081`. Its application endpoints
 are `GET /api/search` and `POST /api/upload`. Test counters are available at
 `GET /_mock/stats` and can be cleared with `POST /_mock/reset`.

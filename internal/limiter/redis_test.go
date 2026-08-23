@@ -18,6 +18,16 @@ type fakeScriptRunner struct {
 	args   []interface{}
 }
 
+type fakePinger struct {
+	err         error
+	hadDeadline bool
+}
+
+func (f *fakePinger) Ping(ctx context.Context) error {
+	_, f.hadDeadline = ctx.Deadline()
+	return f.err
+}
+
 func (f *fakeScriptRunner) Run(_ context.Context, keys []string, args ...interface{}) (interface{}, error) {
 	f.keys = keys
 	f.args = args
@@ -86,6 +96,30 @@ func TestRedisLimiterCheckValidatesInput(t *testing.T) {
 
 	if _, err := limiter.Check(context.Background(), request); err == nil {
 		t.Fatal("Check accepted an empty client ID")
+	}
+}
+
+func TestRedisLimiterPing(t *testing.T) {
+	pinger := &fakePinger{}
+	limiter := &RedisLimiter{pinger: pinger, timeout: time.Second}
+
+	if err := limiter.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping returned an error: %v", err)
+	}
+	if !pinger.hadDeadline {
+		t.Error("Ping context did not have an operation deadline")
+	}
+}
+
+func TestRedisLimiterPingWrapsError(t *testing.T) {
+	limiter := &RedisLimiter{
+		pinger:  &fakePinger{err: errors.New("connection refused")},
+		timeout: time.Second,
+	}
+
+	err := limiter.Ping(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "ping Redis: connection refused") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
