@@ -23,6 +23,41 @@ type fakeLimiter struct {
 	requests []limiter.CheckRequest
 }
 
+type metricObservation struct {
+	route  string
+	result string
+}
+
+type fakeMetrics struct {
+	mu            sync.Mutex
+	observations  []metricObservation
+	limiterErrors []string
+}
+
+func (f *fakeMetrics) ObserveRequest(route, result string, _ time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.observations = append(f.observations, metricObservation{route: route, result: result})
+}
+
+func (f *fakeMetrics) IncLimiterError(route string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.limiterErrors = append(f.limiterErrors, route)
+}
+
+func (f *fakeMetrics) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("test_metric 1\n"))
+	})
+}
+
+func (f *fakeMetrics) lastObservation() metricObservation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.observations[len(f.observations)-1]
+}
+
 func (f *fakeLimiter) Check(_ context.Context, request limiter.CheckRequest) (limiter.Decision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -147,6 +182,7 @@ func TestGatewayHandlesMissingPreparedBackend(t *testing.T) {
 		proxies,
 		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
 		config.FailurePolicyOpen,
+		&fakeMetrics{},
 	)
 
 	response := httptest.NewRecorder()
@@ -177,7 +213,7 @@ func TestGatewayHealthAndReservedPathsNeverReachBackend(t *testing.T) {
 		t.Errorf("health body = %q", health.Body.String())
 	}
 
-	for _, path := range []string{"/health/details", "/ready", "/ready/details", "/metrics", "/metrics/details"} {
+	for _, path := range []string{"/health/details", "/ready", "/ready/details", "/metrics/details"} {
 		response := httptest.NewRecorder()
 		gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusNotFound {
@@ -355,6 +391,84 @@ func TestGatewayRedisFailurePolicies(t *testing.T) {
 	}
 }
 
+func TestGatewayRecordsRequestOutcomes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		decision limiter.Decision
+		err      error
+		policy   string
+		want     string
+	}{
+		{name: "allowed", decision: limiter.Decision{Allowed: true}, policy: config.FailurePolicyOpen, want: "allowed"},
+		{name: "rejected", decision: limiter.Decision{}, policy: config.FailurePolicyOpen, want: "rejected"},
+		{name: "fail open", err: errors.New("unavailable"), policy: config.FailurePolicyOpen, want: "fail_open"},
+		{name: "fail closed", err: errors.New("unavailable"), policy: config.FailurePolicyClosed, want: "fail_closed"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			applicationMetrics := &fakeMetrics{}
+			gateway := testGatewayWithDependencies(
+				t,
+				[]config.RouteConfig{testRoute("search", http.MethodGet, "/api/search", 10)},
+				testBackends(),
+				countingTransport(new(atomic.Int64)),
+				&fakeLimiter{decision: test.decision, err: test.err},
+				test.policy,
+				applicationMetrics,
+			)
+
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/search", nil))
+
+			observation := applicationMetrics.lastObservation()
+			if observation.route != "search" || observation.result != test.want {
+				t.Errorf("observation = %#v, want route search and result %s", observation, test.want)
+			}
+			if test.err != nil && len(applicationMetrics.limiterErrors) != 1 {
+				t.Errorf("limiter error count = %d, want 1", len(applicationMetrics.limiterErrors))
+			}
+		})
+	}
+}
+
+func TestGatewayMetricsEndpointBypassesLimiter(t *testing.T) {
+	t.Parallel()
+
+	requestLimiter := &fakeLimiter{decision: limiter.Decision{Allowed: true}}
+	applicationMetrics := &fakeMetrics{}
+	gateway := testGatewayWithDependencies(
+		t,
+		[]config.RouteConfig{testRoute("catch-all", http.MethodGet, "/", 10)},
+		testBackends(),
+		countingTransport(new(atomic.Int64)),
+		requestLimiter,
+		config.FailurePolicyOpen,
+		applicationMetrics,
+	)
+
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if response.Code != http.StatusOK || response.Body.String() != "test_metric 1\n" {
+		t.Errorf("metrics response = status %d body %q", response.Code, response.Body.String())
+	}
+	if len(requestLimiter.requests) != 0 {
+		t.Errorf("limiter received %d requests, want 0", len(requestLimiter.requests))
+	}
+	if len(applicationMetrics.observations) != 0 {
+		t.Errorf("application observations = %d, want 0", len(applicationMetrics.observations))
+	}
+
+	methodNotAllowed := httptest.NewRecorder()
+	gateway.ServeHTTP(methodNotAllowed, httptest.NewRequest(http.MethodPost, "/metrics", nil))
+	if methodNotAllowed.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /metrics status = %d, want %d", methodNotAllowed.Code, http.StatusMethodNotAllowed)
+	}
+}
+
 func TestRetryAfterSecondsRoundsUp(t *testing.T) {
 	t.Parallel()
 
@@ -387,6 +501,7 @@ func testGateway(
 		registry,
 		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
 		config.FailurePolicyOpen,
+		&fakeMetrics{},
 	)
 }
 
@@ -401,7 +516,34 @@ func testGatewayWithLimiter(
 	t.Helper()
 
 	registry := mustProxyRegistry(t, backends, transport)
-	return newGateway(NewRouteMatcher(routes), registry, requestLimiter, failurePolicy)
+	return newGateway(
+		NewRouteMatcher(routes),
+		registry,
+		requestLimiter,
+		failurePolicy,
+		&fakeMetrics{},
+	)
+}
+
+func testGatewayWithDependencies(
+	t *testing.T,
+	routes []config.RouteConfig,
+	backends map[string]config.BackendConfig,
+	transport http.RoundTripper,
+	requestLimiter limiter.Limiter,
+	failurePolicy string,
+	applicationMetrics Metrics,
+) *Gateway {
+	t.Helper()
+
+	registry := mustProxyRegistry(t, backends, transport)
+	return newGateway(
+		NewRouteMatcher(routes),
+		registry,
+		requestLimiter,
+		failurePolicy,
+		applicationMetrics,
+	)
 }
 
 func countingTransport(calls *atomic.Int64) http.RoundTripper {

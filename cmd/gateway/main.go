@@ -16,6 +16,7 @@ import (
 	"github.com/dsri45/gatekeeper/internal/config"
 	"github.com/dsri45/gatekeeper/internal/gateway"
 	"github.com/dsri45/gatekeeper/internal/limiter"
+	applicationmetrics "github.com/dsri45/gatekeeper/internal/metrics"
 )
 
 const maxHeaderBytes = 1 << 20 // 1 MiB
@@ -64,7 +65,7 @@ func run(ctx context.Context, arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
-	application, err := gateway.New(cfg, redisLimiter)
+	application, err := gateway.New(cfg, redisLimiter, applicationmetrics.New())
 	if err != nil {
 		return err
 	}

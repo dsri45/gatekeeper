@@ -18,15 +18,26 @@ type Gateway struct {
 	proxies       *ProxyRegistry
 	limiter       limiter.Limiter
 	failurePolicy string
+	metrics       Metrics
+}
+
+// Metrics records bounded-label gateway measurements and serves them to Prometheus.
+type Metrics interface {
+	ObserveRequest(route, result string, elapsed time.Duration)
+	IncLimiterError(route string)
+	Handler() http.Handler
 }
 
 // New validates configuration and creates a ready-to-serve Gateway.
-func New(cfg config.Config, requestLimiter limiter.Limiter) (*Gateway, error) {
+func New(cfg config.Config, requestLimiter limiter.Limiter, applicationMetrics Metrics) (*Gateway, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate gateway configuration: %w", err)
 	}
 	if requestLimiter == nil {
 		return nil, fmt.Errorf("rate limiter is required")
+	}
+	if applicationMetrics == nil {
+		return nil, fmt.Errorf("metrics recorder is required")
 	}
 
 	proxies, err := NewProxyRegistry(cfg.Backends)
@@ -39,6 +50,7 @@ func New(cfg config.Config, requestLimiter limiter.Limiter) (*Gateway, error) {
 		proxies,
 		requestLimiter,
 		cfg.Redis.FailurePolicy,
+		applicationMetrics,
 	), nil
 }
 
@@ -47,12 +59,14 @@ func newGateway(
 	proxies *ProxyRegistry,
 	requestLimiter limiter.Limiter,
 	failurePolicy string,
+	applicationMetrics Metrics,
 ) *Gateway {
 	return &Gateway{
 		matcher:       matcher,
 		proxies:       proxies,
 		limiter:       requestLimiter,
 		failurePolicy: failurePolicy,
+		metrics:       applicationMetrics,
 	}
 }
 
@@ -67,6 +81,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		writeGatewayError(w, http.StatusNotFound, "route not found")
 		return
 	}
+	started := time.Now()
+	result := ""
+	defer func() {
+		if result != "" {
+			g.metrics.ObserveRequest(route.Name(), result, time.Since(started))
+		}
+	}()
 
 	identity, err := IdentifyClient(request)
 	if err != nil {
@@ -81,21 +102,26 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		Limit:    limit,
 	})
 	if err != nil {
+		g.metrics.IncLimiterError(route.Name())
 		if g.failurePolicy == config.FailurePolicyOpen {
+			result = "fail_open"
 			g.proxy(w, request, route)
 			return
 		}
+		result = "fail_closed"
 		writeGatewayError(w, http.StatusServiceUnavailable, "rate limiter unavailable")
 		return
 	}
 
 	setRateLimitHeaders(w.Header(), limit.Capacity, decision.Remaining)
 	if !decision.Allowed {
+		result = "rejected"
 		w.Header().Set("Retry-After", retryAfterSeconds(decision.RetryAfter))
 		writeGatewayError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
 
+	result = "allowed"
 	g.proxy(w, request, route)
 }
 
@@ -139,6 +165,16 @@ func (g *Gateway) handleInternal(w http.ResponseWriter, request *http.Request) b
 		writeGatewayJSON(w, http.StatusOK, struct {
 			Status string `json:"status"`
 		}{Status: "healthy"})
+		return true
+	}
+	if path == "/metrics" {
+		if request.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeGatewayError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return true
+		}
+
+		g.metrics.Handler().ServeHTTP(w, request)
 		return true
 	}
 

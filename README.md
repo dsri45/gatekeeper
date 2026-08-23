@@ -8,8 +8,8 @@ proxying allowed HTTP requests to backend services.
 
 The gateway now enforces atomic Redis-backed token buckets, supports per-client
 overrides, returns `429 Too Many Requests`, and applies a configurable Redis
-failure policy. Observability and the containerized demo stack are the next
-milestones.
+failure policy. Prometheus request, latency, and limiter-error metrics are
+available at `GET /metrics`.
 
 ## Documentation
 
@@ -41,6 +41,12 @@ Send a request through Gatekeeper:
 
 ```powershell
 curl.exe -H "X-API-Key: demo-client" "http://localhost:8080/api/search?q=redis"
+```
+
+Inspect Prometheus metrics:
+
+```powershell
+curl.exe "http://localhost:8080/metrics"
 ```
 
 The mock backend listens on `http://localhost:8081`. Its application endpoints

@@ -263,14 +263,14 @@ Structured logs will identify the request and describe its routing outcome. The
 rate-limit decision is recorded alongside it. Separate fields capture timing
 and dependency failures. Raw API keys will not be logged.
 
-Prometheus metrics will include:
+Prometheus metrics include:
 
-- total requests by route and decision;
-- allowed and rejected requests;
-- Redis and backend errors;
-- in-flight requests;
-- overall request latency; and
-- backend latency.
+- total matched requests by configured route and limiter result;
+- matched-request latency histograms; and
+- rate-limiter dependency errors by configured route.
+
+Backend-specific latency and in-flight request gauges can be added when the
+project's operational monitoring is expanded.
 
 Labels will use bounded values such as configured route names and status
 classes. Client identities are deliberately excluded to avoid sensitive data
