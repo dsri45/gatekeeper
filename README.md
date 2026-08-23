@@ -13,6 +13,7 @@ rate limiting is the next milestone.
 
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Token-bucket specification](docs/rate-limiting.md)
 
 ## Requirements
 
