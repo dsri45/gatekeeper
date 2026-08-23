@@ -15,6 +15,7 @@ import (
 
 	"github.com/dsri45/gatekeeper/internal/config"
 	"github.com/dsri45/gatekeeper/internal/gateway"
+	"github.com/dsri45/gatekeeper/internal/limiter"
 )
 
 const maxHeaderBytes = 1 << 20 // 1 MiB
@@ -53,7 +54,17 @@ func run(ctx context.Context, arguments []string, logger *slog.Logger) error {
 		return err
 	}
 
-	application, err := gateway.New(cfg)
+	redisLimiter, err := limiter.NewRedis(cfg.Redis)
+	if err != nil {
+		return fmt.Errorf("create Redis limiter: %w", err)
+	}
+	defer func() {
+		if closeErr := redisLimiter.Close(); closeErr != nil {
+			logger.Warn("close Redis limiter", "error", closeErr)
+		}
+	}()
+
+	application, err := gateway.New(cfg, redisLimiter)
 	if err != nil {
 		return err
 	}

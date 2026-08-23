@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,9 +10,31 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dsri45/gatekeeper/internal/config"
+	"github.com/dsri45/gatekeeper/internal/limiter"
 )
+
+type fakeLimiter struct {
+	mu       sync.Mutex
+	decision limiter.Decision
+	err      error
+	requests []limiter.CheckRequest
+}
+
+func (f *fakeLimiter) Check(_ context.Context, request limiter.CheckRequest) (limiter.Decision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, request)
+	return f.decision, f.err
+}
+
+func (f *fakeLimiter) lastRequest() limiter.CheckRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests[len(f.requests)-1]
+}
 
 func TestGatewayProxiesMatchedRequest(t *testing.T) {
 	t.Parallel()
@@ -118,7 +142,12 @@ func TestGatewayHandlesMissingPreparedBackend(t *testing.T) {
 	proxies := mustProxyRegistry(t, map[string]config.BackendConfig{
 		"different": {URL: "http://backend.test"},
 	}, countingTransport(new(atomic.Int64)))
-	gateway := newGateway(matcher, proxies)
+	gateway := newGateway(
+		matcher,
+		proxies,
+		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
+		config.FailurePolicyOpen,
+	)
 
 	response := httptest.NewRecorder()
 	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/search", nil))
@@ -206,6 +235,144 @@ func TestGatewaySupportsConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsLimitedRequestBeforeProxying(t *testing.T) {
+	t.Parallel()
+
+	var backendCalls atomic.Int64
+	requestLimiter := &fakeLimiter{decision: limiter.Decision{
+		Allowed:    false,
+		Remaining:  0,
+		RetryAfter: 250 * time.Millisecond,
+	}}
+	gateway := testGatewayWithLimiter(
+		t,
+		[]config.RouteConfig{testRoute("search", http.MethodGet, "/api/search", 10)},
+		testBackends(),
+		countingTransport(&backendCalls),
+		requestLimiter,
+		config.FailurePolicyOpen,
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/search", nil)
+	request.Header.Set(APIKeyHeader, "demo-client")
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d", response.Code, http.StatusTooManyRequests)
+	}
+	if response.Header().Get("RateLimit-Limit") != "10" {
+		t.Errorf("RateLimit-Limit = %q, want 10", response.Header().Get("RateLimit-Limit"))
+	}
+	if response.Header().Get("RateLimit-Remaining") != "0" {
+		t.Errorf("RateLimit-Remaining = %q, want 0", response.Header().Get("RateLimit-Remaining"))
+	}
+	if response.Header().Get("Retry-After") != "1" {
+		t.Errorf("Retry-After = %q, want 1", response.Header().Get("Retry-After"))
+	}
+	if response.Body.String() != "{\"error\":\"rate limit exceeded\"}\n" {
+		t.Errorf("body = %q", response.Body.String())
+	}
+	if backendCalls.Load() != 0 {
+		t.Errorf("backend was called %d times", backendCalls.Load())
+	}
+}
+
+func TestGatewayUsesClientOverride(t *testing.T) {
+	t.Parallel()
+
+	route := testRoute("search", http.MethodGet, "/api/search", 10)
+	route.ClientOverrides = map[string]config.LimitConfig{
+		"premium-client": {
+			Capacity: 100,
+			Refill: config.RefillConfig{
+				Tokens:   100,
+				Interval: config.NewDuration(time.Minute),
+			},
+		},
+	}
+	requestLimiter := &fakeLimiter{decision: limiter.Decision{Allowed: true, Remaining: 99}}
+	gateway := testGatewayWithLimiter(
+		t,
+		[]config.RouteConfig{route},
+		testBackends(),
+		countingTransport(new(atomic.Int64)),
+		requestLimiter,
+		config.FailurePolicyOpen,
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/search", nil)
+	request.Header.Set(APIKeyHeader, "premium-client")
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if response.Header().Get("RateLimit-Limit") != "100" {
+		t.Errorf("RateLimit-Limit = %q, want 100", response.Header().Get("RateLimit-Limit"))
+	}
+	if got := requestLimiter.lastRequest().Limit.Capacity; got != 100 {
+		t.Errorf("limiter capacity = %d, want 100", got)
+	}
+}
+
+func TestGatewayRedisFailurePolicies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		policy           string
+		wantStatus       int
+		wantBackendCalls int64
+	}{
+		{name: "fail open", policy: config.FailurePolicyOpen, wantStatus: http.StatusOK, wantBackendCalls: 1},
+		{name: "fail closed", policy: config.FailurePolicyClosed, wantStatus: http.StatusServiceUnavailable},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var backendCalls atomic.Int64
+			gateway := testGatewayWithLimiter(
+				t,
+				[]config.RouteConfig{testRoute("search", http.MethodGet, "/api/search", 10)},
+				testBackends(),
+				countingTransport(&backendCalls),
+				&fakeLimiter{err: errors.New("Redis unavailable")},
+				test.policy,
+			)
+
+			response := httptest.NewRecorder()
+			gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/search", nil))
+
+			if response.Code != test.wantStatus {
+				t.Errorf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+			if backendCalls.Load() != test.wantBackendCalls {
+				t.Errorf("backend calls = %d, want %d", backendCalls.Load(), test.wantBackendCalls)
+			}
+		})
+	}
+}
+
+func TestRetryAfterSecondsRoundsUp(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		wait time.Duration
+		want string
+	}{
+		{wait: 0, want: "1"},
+		{wait: time.Millisecond, want: "1"},
+		{wait: time.Second, want: "1"},
+		{wait: time.Second + time.Millisecond, want: "2"},
+	} {
+		if got := retryAfterSeconds(test.wait); got != test.want {
+			t.Errorf("retryAfterSeconds(%s) = %q, want %q", test.wait, got, test.want)
+		}
+	}
+}
+
 func testGateway(
 	t *testing.T,
 	routes []config.RouteConfig,
@@ -215,7 +382,26 @@ func testGateway(
 	t.Helper()
 
 	registry := mustProxyRegistry(t, backends, transport)
-	return newGateway(NewRouteMatcher(routes), registry)
+	return newGateway(
+		NewRouteMatcher(routes),
+		registry,
+		&fakeLimiter{decision: limiter.Decision{Allowed: true}},
+		config.FailurePolicyOpen,
+	)
+}
+
+func testGatewayWithLimiter(
+	t *testing.T,
+	routes []config.RouteConfig,
+	backends map[string]config.BackendConfig,
+	transport http.RoundTripper,
+	requestLimiter limiter.Limiter,
+	failurePolicy string,
+) *Gateway {
+	t.Helper()
+
+	registry := mustProxyRegistry(t, backends, transport)
+	return newGateway(NewRouteMatcher(routes), registry, requestLimiter, failurePolicy)
 }
 
 func countingTransport(calls *atomic.Int64) http.RoundTripper {

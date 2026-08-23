@@ -1,13 +1,15 @@
 # Gatekeeper
 
-Gatekeeper is a distributed rate-limiting API gateway written in Go. It will
-use Redis-backed token buckets to enforce per-client and per-route limits before
+Gatekeeper is a distributed rate-limiting API gateway written in Go. It uses
+Redis-backed token buckets to enforce per-client and per-route limits before
 proxying allowed HTTP requests to backend services.
 
 ## Status
 
-The functional HTTP gateway and mock backend are implemented. Distributed Redis
-rate limiting is the next milestone.
+The gateway now enforces atomic Redis-backed token buckets, supports per-client
+overrides, returns `429 Too Many Requests`, and applies a configurable Redis
+failure policy. Observability and the containerized demo stack are the next
+milestones.
 
 ## Documentation
 
@@ -18,7 +20,8 @@ rate limiting is the next milestone.
 ## Requirements
 
 - Go 1.26 or newer
-- Docker and Docker Compose (required once Redis and the demo stack are added)
+- A reachable Redis server for rate-limit enforcement
+- Docker and Docker Compose once the containerized demo stack is added
 
 ## Run locally
 

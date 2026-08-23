@@ -4,21 +4,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dsri45/gatekeeper/internal/config"
+	"github.com/dsri45/gatekeeper/internal/limiter"
 )
 
 // Gateway assembles request identification, routing, and backend proxying.
 type Gateway struct {
-	matcher *RouteMatcher
-	proxies *ProxyRegistry
+	matcher       *RouteMatcher
+	proxies       *ProxyRegistry
+	limiter       limiter.Limiter
+	failurePolicy string
 }
 
 // New validates configuration and creates a ready-to-serve Gateway.
-func New(cfg config.Config) (*Gateway, error) {
+func New(cfg config.Config, requestLimiter limiter.Limiter) (*Gateway, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate gateway configuration: %w", err)
+	}
+	if requestLimiter == nil {
+		return nil, fmt.Errorf("rate limiter is required")
 	}
 
 	proxies, err := NewProxyRegistry(cfg.Backends)
@@ -26,11 +34,26 @@ func New(cfg config.Config) (*Gateway, error) {
 		return nil, fmt.Errorf("prepare backend proxies: %w", err)
 	}
 
-	return newGateway(NewRouteMatcher(cfg.Routes), proxies), nil
+	return newGateway(
+		NewRouteMatcher(cfg.Routes),
+		proxies,
+		requestLimiter,
+		cfg.Redis.FailurePolicy,
+	), nil
 }
 
-func newGateway(matcher *RouteMatcher, proxies *ProxyRegistry) *Gateway {
-	return &Gateway{matcher: matcher, proxies: proxies}
+func newGateway(
+	matcher *RouteMatcher,
+	proxies *ProxyRegistry,
+	requestLimiter limiter.Limiter,
+	failurePolicy string,
+) *Gateway {
+	return &Gateway{
+		matcher:       matcher,
+		proxies:       proxies,
+		limiter:       requestLimiter,
+		failurePolicy: failurePolicy,
+	}
 }
 
 // ServeHTTP handles internal endpoints or proxies a configured application route.
@@ -45,11 +68,38 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	if _, err := IdentifyClient(request); err != nil {
+	identity, err := IdentifyClient(request)
+	if err != nil {
 		writeGatewayError(w, http.StatusBadRequest, "invalid client identity")
 		return
 	}
 
+	limit := route.LimitFor(identity)
+	decision, err := g.limiter.Check(request.Context(), limiter.CheckRequest{
+		Route:    route.Name(),
+		ClientID: identity.BucketID(),
+		Limit:    limit,
+	})
+	if err != nil {
+		if g.failurePolicy == config.FailurePolicyOpen {
+			g.proxy(w, request, route)
+			return
+		}
+		writeGatewayError(w, http.StatusServiceUnavailable, "rate limiter unavailable")
+		return
+	}
+
+	setRateLimitHeaders(w.Header(), limit.Capacity, decision.Remaining)
+	if !decision.Allowed {
+		w.Header().Set("Retry-After", retryAfterSeconds(decision.RetryAfter))
+		writeGatewayError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+
+	g.proxy(w, request, route)
+}
+
+func (g *Gateway) proxy(w http.ResponseWriter, request *http.Request, route Route) {
 	proxy, found := g.proxies.Handler(route.Backend())
 	if !found {
 		writeGatewayError(w, http.StatusInternalServerError, "gateway configuration error")
@@ -57,6 +107,19 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	}
 
 	proxy.ServeHTTP(w, request)
+}
+
+func setRateLimitHeaders(header http.Header, capacity, remaining int64) {
+	header.Set("RateLimit-Limit", strconv.FormatInt(capacity, 10))
+	header.Set("RateLimit-Remaining", strconv.FormatInt(remaining, 10))
+}
+
+func retryAfterSeconds(wait time.Duration) string {
+	seconds := int64((wait + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return strconv.FormatInt(seconds, 10)
 }
 
 // CloseIdleConnections releases connections retained by backend transports.
