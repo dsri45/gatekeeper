@@ -259,9 +259,11 @@ propagated to backend work.
 
 ## Observability
 
-Structured logs will identify the request and describe its routing outcome. The
-rate-limit decision is recorded alongside it. Separate fields capture timing
-and dependency failures. Raw API keys will not be logged.
+Structured JSON completion logs describe each request using its method,
+configured route, routing outcome, final status, and duration. Matched requests
+also include the backend name and client identity kind. Redis failures are
+explicitly marked. Raw API keys, stable client identifiers, IP addresses, query
+parameters, bodies, and authorization headers are not logged.
 
 Prometheus metrics include:
 

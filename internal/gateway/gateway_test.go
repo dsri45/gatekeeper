@@ -1,9 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -194,6 +197,7 @@ func TestGatewayHandlesMissingPreparedBackend(t *testing.T) {
 		&fakeReadiness{},
 		config.FailurePolicyOpen,
 		&fakeMetrics{},
+		discardRequestLogger(),
 	)
 
 	response := httptest.NewRecorder()
@@ -590,6 +594,93 @@ func TestRetryAfterSecondsRoundsUp(t *testing.T) {
 	}
 }
 
+func TestGatewayWritesSafeStructuredRequestLog(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	gateway := testGatewayWithLogger(
+		t,
+		&fakeLimiter{decision: limiter.Decision{Allowed: false, RetryAfter: time.Second}},
+		config.FailurePolicyOpen,
+		logger,
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/search?secret=query-value", nil)
+	request.Header.Set(APIKeyHeader, "raw-secret-api-key")
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+
+	var entry map[string]interface{}
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatalf("decode JSON log: %v; output = %q", err, output.String())
+	}
+	for field, want := range map[string]interface{}{
+		"msg":         "request completed",
+		"method":      http.MethodGet,
+		"route":       "search",
+		"result":      "rejected",
+		"status":      float64(http.StatusTooManyRequests),
+		"backend":     "mock",
+		"client_kind": "api-key",
+	} {
+		if got := entry[field]; got != want {
+			t.Errorf("%s = %#v, want %#v", field, got, want)
+		}
+	}
+	if duration, ok := entry["duration_ms"].(float64); !ok || duration < 0 {
+		t.Errorf("duration_ms = %#v, want a nonnegative number", entry["duration_ms"])
+	}
+	if strings.Contains(output.String(), "raw-secret-api-key") ||
+		strings.Contains(output.String(), "query-value") {
+		t.Errorf("log contains sensitive request data: %s", output.String())
+	}
+}
+
+func TestGatewayLogsRedisFailureAtErrorLevel(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	gateway := testGatewayWithLogger(
+		t,
+		&fakeLimiter{err: errors.New("Redis unavailable")},
+		config.FailurePolicyOpen,
+		logger,
+	)
+
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/search", nil))
+
+	var entry map[string]interface{}
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatalf("decode JSON log: %v", err)
+	}
+	if entry["level"] != "ERROR" || entry["result"] != "fail_open" || entry["redis_error"] != true {
+		t.Errorf("unexpected Redis failure log: %s", output.String())
+	}
+}
+
+func TestStatusRecorderPreservesUnderlyingWriter(t *testing.T) {
+	t.Parallel()
+
+	underlying := httptest.NewRecorder()
+	recorder := &statusRecorder{ResponseWriter: underlying}
+	if recorder.Unwrap() != underlying {
+		t.Fatal("Unwrap did not return the underlying response writer")
+	}
+	if _, err := recorder.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if recorder.statusCode() != http.StatusOK {
+		t.Errorf("status = %d, want %d", recorder.statusCode(), http.StatusOK)
+	}
+	recorder.WriteHeader(http.StatusCreated)
+	if recorder.statusCode() != http.StatusOK {
+		t.Errorf("second WriteHeader changed status to %d", recorder.statusCode())
+	}
+}
+
 func testGateway(
 	t *testing.T,
 	routes []config.RouteConfig,
@@ -606,6 +697,7 @@ func testGateway(
 		&fakeReadiness{},
 		config.FailurePolicyOpen,
 		&fakeMetrics{},
+		discardRequestLogger(),
 	)
 }
 
@@ -627,6 +719,7 @@ func testGatewayWithLimiter(
 		&fakeReadiness{},
 		failurePolicy,
 		&fakeMetrics{},
+		discardRequestLogger(),
 	)
 }
 
@@ -649,6 +742,7 @@ func testGatewayWithDependencies(
 		&fakeReadiness{},
 		failurePolicy,
 		applicationMetrics,
+		discardRequestLogger(),
 	)
 }
 
@@ -669,7 +763,32 @@ func testGatewayWithReadiness(
 		readiness,
 		failurePolicy,
 		&fakeMetrics{},
+		discardRequestLogger(),
 	)
+}
+
+func testGatewayWithLogger(
+	t *testing.T,
+	requestLimiter limiter.Limiter,
+	failurePolicy string,
+	logger *slog.Logger,
+) *Gateway {
+	t.Helper()
+
+	registry := mustProxyRegistry(t, testBackends(), countingTransport(new(atomic.Int64)))
+	return newGateway(
+		NewRouteMatcher([]config.RouteConfig{testRoute("search", http.MethodGet, "/api/search", 10)}),
+		registry,
+		requestLimiter,
+		&fakeReadiness{},
+		failurePolicy,
+		&fakeMetrics{},
+		logger,
+	)
+}
+
+func discardRequestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func countingTransport(calls *atomic.Int64) http.RoundTripper {

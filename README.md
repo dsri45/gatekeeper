@@ -9,7 +9,8 @@ proxying allowed HTTP requests to backend services.
 The gateway now enforces atomic Redis-backed token buckets, supports per-client
 overrides, returns `429 Too Many Requests`, and applies a configurable Redis
 failure policy. Prometheus request, latency, and limiter-error metrics are
-available at `GET /metrics`.
+available at `GET /metrics`. Each request also produces a structured JSON
+completion log without client identifiers or query data.
 
 ## Documentation
 

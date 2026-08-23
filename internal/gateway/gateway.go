@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ type Gateway struct {
 	readiness     ReadinessChecker
 	failurePolicy string
 	metrics       Metrics
+	logger        *slog.Logger
 }
 
 // ReadinessChecker verifies whether the rate-limit dependency is available.
@@ -41,6 +43,7 @@ func New(
 	requestLimiter limiter.Limiter,
 	readiness ReadinessChecker,
 	applicationMetrics Metrics,
+	logger *slog.Logger,
 ) (*Gateway, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate gateway configuration: %w", err)
@@ -53,6 +56,9 @@ func New(
 	}
 	if applicationMetrics == nil {
 		return nil, fmt.Errorf("metrics recorder is required")
+	}
+	if logger == nil {
+		return nil, fmt.Errorf("logger is required")
 	}
 
 	proxies, err := NewProxyRegistry(cfg.Backends)
@@ -67,6 +73,7 @@ func New(
 		readiness,
 		cfg.Redis.FailurePolicy,
 		applicationMetrics,
+		logger,
 	), nil
 }
 
@@ -77,6 +84,7 @@ func newGateway(
 	readiness ReadinessChecker,
 	failurePolicy string,
 	applicationMetrics Metrics,
+	logger *slog.Logger,
 ) *Gateway {
 	return &Gateway{
 		matcher:       matcher,
@@ -85,12 +93,23 @@ func newGateway(
 		readiness:     readiness,
 		failurePolicy: failurePolicy,
 		metrics:       applicationMetrics,
+		logger:        logger,
 	}
 }
 
 // ServeHTTP handles internal endpoints or proxies a configured application route.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	if g.handleInternal(w, request) {
+	recorder := &statusRecorder{ResponseWriter: w}
+	w = recorder
+	started := time.Now()
+	logFields := requestLog{route: "unmatched", result: "route_not_found"}
+	defer func() {
+		g.logRequest(request, recorder.statusCode(), time.Since(started), logFields)
+	}()
+
+	if internalRoute, handled := g.handleInternal(recorder, request); handled {
+		logFields.route = internalRoute
+		logFields.result = "internal"
 		return
 	}
 
@@ -99,19 +118,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		writeGatewayError(w, http.StatusNotFound, "route not found")
 		return
 	}
-	started := time.Now()
+	logFields.route = route.Name()
+	logFields.backend = route.Backend()
+	metricsStarted := time.Now()
 	result := ""
 	defer func() {
 		if result != "" {
-			g.metrics.ObserveRequest(route.Name(), result, time.Since(started))
+			g.metrics.ObserveRequest(route.Name(), result, time.Since(metricsStarted))
 		}
 	}()
 
 	identity, err := IdentifyClient(request)
 	if err != nil {
+		logFields.result = "invalid_client"
 		writeGatewayError(w, http.StatusBadRequest, "invalid client identity")
 		return
 	}
+	logFields.clientKind = string(identity.Kind())
 
 	limit := route.LimitFor(identity)
 	decision, err := g.limiter.Check(request.Context(), limiter.CheckRequest{
@@ -120,13 +143,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		Limit:    limit,
 	})
 	if err != nil {
+		logFields.redisError = true
 		g.metrics.IncLimiterError(route.Name())
 		if g.failurePolicy == config.FailurePolicyOpen {
 			result = "fail_open"
+			logFields.result = result
 			g.proxy(w, request, route)
 			return
 		}
 		result = "fail_closed"
+		logFields.result = result
 		writeGatewayError(w, http.StatusServiceUnavailable, "rate limiter unavailable")
 		return
 	}
@@ -134,13 +160,84 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	setRateLimitHeaders(w.Header(), limit.Capacity, decision.Remaining)
 	if !decision.Allowed {
 		result = "rejected"
+		logFields.result = result
 		w.Header().Set("Retry-After", retryAfterSeconds(decision.RetryAfter))
 		writeGatewayError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
 
 	result = "allowed"
+	logFields.result = result
 	g.proxy(w, request, route)
+}
+
+type requestLog struct {
+	route      string
+	backend    string
+	result     string
+	clientKind string
+	redisError bool
+}
+
+func (g *Gateway) logRequest(
+	request *http.Request,
+	status int,
+	elapsed time.Duration,
+	fields requestLog,
+) {
+	attributes := []any{
+		"method", request.Method,
+		"route", fields.route,
+		"result", fields.result,
+		"status", status,
+		"duration_ms", float64(elapsed.Microseconds()) / 1000,
+	}
+	if fields.backend != "" {
+		attributes = append(attributes, "backend", fields.backend)
+	}
+	if fields.clientKind != "" {
+		attributes = append(attributes, "client_kind", fields.clientKind)
+	}
+	if fields.redisError {
+		attributes = append(attributes, "redis_error", true)
+	}
+
+	if status >= http.StatusInternalServerError || fields.redisError {
+		g.logger.ErrorContext(request.Context(), "request completed", attributes...)
+		return
+	}
+	g.logger.InfoContext(request.Context(), "request completed", attributes...)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	if r.status != 0 {
+		return
+	}
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(body []byte) (int, error) {
+	if r.status == 0 {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(body)
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+func (r *statusRecorder) statusCode() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
 }
 
 func (g *Gateway) proxy(w http.ResponseWriter, request *http.Request, route Route) {
@@ -171,25 +268,25 @@ func (g *Gateway) CloseIdleConnections() {
 	g.proxies.CloseIdleConnections()
 }
 
-func (g *Gateway) handleInternal(w http.ResponseWriter, request *http.Request) bool {
+func (g *Gateway) handleInternal(w http.ResponseWriter, request *http.Request) (string, bool) {
 	path := request.URL.Path
 	if path == "/health" {
 		if request.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeGatewayError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return true
+			return "health", true
 		}
 
 		writeGatewayJSON(w, http.StatusOK, struct {
 			Status string `json:"status"`
 		}{Status: "healthy"})
-		return true
+		return "health", true
 	}
 	if path == "/ready" {
 		if request.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeGatewayError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return true
+			return "ready", true
 		}
 
 		if err := g.readiness.Ping(request.Context()); err == nil {
@@ -199,27 +296,27 @@ func (g *Gateway) handleInternal(w http.ResponseWriter, request *http.Request) b
 		} else {
 			writeReadiness(w, http.StatusServiceUnavailable, "not_ready", "unavailable")
 		}
-		return true
+		return "ready", true
 	}
 	if path == "/metrics" {
 		if request.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
 			writeGatewayError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return true
+			return "metrics", true
 		}
 
 		g.metrics.Handler().ServeHTTP(w, request)
-		return true
+		return "metrics", true
 	}
 
 	if hasInternalPrefix(path, "/health") ||
 		hasInternalPrefix(path, "/ready") ||
 		hasInternalPrefix(path, "/metrics") {
 		writeGatewayError(w, http.StatusNotFound, "route not found")
-		return true
+		return "unmatched", true
 	}
 
-	return false
+	return "", false
 }
 
 func writeReadiness(w http.ResponseWriter, status int, state, redisState string) {

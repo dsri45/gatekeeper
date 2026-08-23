@@ -65,7 +65,7 @@ func run(ctx context.Context, arguments []string, logger *slog.Logger) error {
 		}
 	}()
 
-	application, err := gateway.New(cfg, redisLimiter, redisLimiter, applicationmetrics.New())
+	application, err := gateway.New(cfg, redisLimiter, redisLimiter, applicationmetrics.New(), logger)
 	if err != nil {
 		return err
 	}
