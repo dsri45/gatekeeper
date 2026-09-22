@@ -4,21 +4,33 @@ This guide deploys Gatekeeper as two ECS Fargate tasks behind an Application
 Load Balancer. Both tasks use one encrypted ElastiCache for Valkey replication
 group, which preserves a global rate limit when requests reach different tasks.
 
-## What the two stacks do
+## What the three stacks do
 
-The deployment is split into two CloudFormation stacks because container images
-must exist before ECS can start its first tasks.
+The deployment is split into three CloudFormation stacks because image storage,
+image publishing, and the running application have different lifecycles and
+permissions.
 
 ### Bootstrap stack
 
 [`../infra/bootstrap.yaml`](../infra/bootstrap.yaml) creates:
 
-- two private ECR repositories for the gateway and mock-backend images;
-- a GitHub OIDC identity provider, unless the AWS account already has one; and
-- a narrowly scoped IAM role for publishing the images and updating ECS.
+- two private ECR repositories for the gateway and mock-backend images.
 
-This stack stores images and establishes permissions. It does not run the
-application.
+This stack stores images. It does not build images or run the application.
+
+### CodeBuild stack
+
+[`../infra/codebuild.yaml`](../infra/codebuild.yaml) creates:
+
+- a CodeBuild project that reads the repository through AWS CodeConnections;
+- a least-privilege service role that can publish only to the two ECR
+  repositories; and
+- a seven-day CloudWatch log group for build output.
+
+CodeBuild follows [`../buildspec.aws.yml`](../buildspec.aws.yml), builds both
+Dockerfiles, and tags each image with the Git commit SHA. AWS CodeConnections
+provides repository access without storing a personal access token in the
+project.
 
 ### Application stack
 
@@ -42,49 +54,37 @@ a controlled NAT egress path.
 
 ## Deployment sequence
 
-Use one AWS Region for every step. The examples use `us-west-2`.
+Use one AWS Region for every step. The examples use `us-east-2` (Ohio).
 
 ### 1. Deploy the bootstrap stack
 
-1. Open AWS CloudFormation and select `us-west-2`.
+1. Open AWS CloudFormation and select `us-east-2`.
 2. Choose **Create stack**, then **With new resources**.
 3. Choose **Upload a template file** and upload `infra/bootstrap.yaml`.
 4. Name the stack `gatekeeper-bootstrap`.
-5. Set `GitHubOwner` to the repository owner and `GitHubRepository` to
-   `gatekeeper`.
-6. If the account already has the GitHub Actions OIDC provider, paste its ARN
-   into `ExistingGitHubOIDCProviderArn`; otherwise leave it empty.
-7. Acknowledge that CloudFormation will create IAM resources and create the
-   stack.
-8. Wait for `CREATE_COMPLETE`, then open the **Outputs** tab.
+5. Continue with the defaults and create the stack.
+6. Wait for `CREATE_COMPLETE`, then open the **Outputs** tab.
 
-The GitHub trust policy accepts workflow identities only from the configured
-repository. The workflow uses the `production` GitHub environment, which can be
-given approval and branch-protection rules.
+### 2. Connect GitHub and deploy CodeBuild
 
-### 2. Configure GitHub
-
-Create a GitHub environment named `production`. Add these repository variables:
-
-| Variable | Initial value |
-| --- | --- |
-| `AWS_REGION` | `us-west-2` |
-| `AWS_ROLE_ARN` | Bootstrap output `GitHubDeploymentRoleArn` |
-| `ECR_GATEWAY_REPOSITORY` | Bootstrap output `GatewayRepositoryName` |
-| `ECR_MOCK_REPOSITORY` | Bootstrap output `MockBackendRepositoryName` |
-| `ENABLE_AWS_PUBLISH` | `true` |
-| `ENABLE_AWS_DEPLOY` | `false` |
-
-Leave the ECS variables unset until the application stack exists.
+1. In **Developer Tools > Connections**, create a GitHub connection named
+   `gatekeeper-github`.
+2. Install the AWS Connector for GitHub App with access only to the
+   `gatekeeper` repository.
+3. Confirm the connection status is `Available` and copy its ARN.
+4. In CloudFormation, upload `infra/codebuild.yaml` as a new stack named
+   `gatekeeper-codebuild`.
+5. Paste the connection ARN, set the GitHub owner and repository, and keep
+   `main` as the branch.
+6. Acknowledge IAM resource creation and wait for `CREATE_COMPLETE`.
 
 ### 3. Publish the first images
 
-Push the project to `main`, or run the **CI/CD** workflow manually against
-`main`. The workflow must complete both **Test and build** and **Publish images
-to Amazon ECR**.
-
-Open the workflow's job summary and copy the two image URIs. Each URI ends with
-the Git commit SHA used as an immutable tag.
+1. Open **CodeBuild > Build projects > gatekeeper-image-builder**.
+2. Choose **Start build** without overriding any settings.
+3. Wait for the build status to become `Succeeded`.
+4. Open the build log or each ECR repository and copy the two image URIs. Each
+   URI ends with the Git commit SHA used as an immutable tag.
 
 ### 4. Deploy the application stack
 
@@ -98,18 +98,13 @@ the Git commit SHA used as an immutable tag.
 7. Wait for `CREATE_COMPLETE`. ElastiCache and ECS can take several minutes.
 8. Open the stack's **Outputs** tab and copy `GatewayURL`.
 
-### 5. Enable later deployments
+### 5. Publish later versions
 
-Add these repository variables using the application stack outputs:
-
-| Variable | Application output |
-| --- | --- |
-| `ECS_CLUSTER` | `ECSClusterName` |
-| `ECS_SERVICE` | `ECSServiceName` |
-| `ECS_CONTAINER_NAME` | `ECSContainerName` |
-
-Set `ENABLE_AWS_DEPLOY` to `true`. Future pushes to `main` will test, publish,
-and deploy both containers after all previous stages succeed.
+After a new commit passes GitHub Actions CI, start another CodeBuild build. Its
+commit-derived tag creates a new immutable version rather than overwriting an
+old image. Update the application stack's two image URI parameters to deploy
+that version. This keeps each release traceable to its source commit and makes
+the production update an explicit approval step.
 
 ## Verification
 
@@ -138,10 +133,10 @@ The application stack contains the continuously billable compute, load
 balancer, and cache resources. After collecting evidence:
 
 1. Delete `gatekeeper-application` and wait for `DELETE_COMPLETE`.
-2. Keep `gatekeeper-bootstrap` only if future deployments are planned.
-3. To remove the stored images and GitHub role too, delete
-   `gatekeeper-bootstrap`. Its ECR repositories are configured to empty during
-   deletion.
+2. Keep `gatekeeper-codebuild` and `gatekeeper-bootstrap` only if future builds
+   are planned.
+3. Delete `gatekeeper-codebuild` to remove its build project, role, and logs.
+4. Delete `gatekeeper-bootstrap` to remove the stored images and repositories.
 
 Deleting files from the Git repository does not delete AWS resources. The
 CloudFormation stacks must be deleted in AWS.

@@ -20,9 +20,23 @@ addition to the unit tests. The full Docker Compose integration test remains a
 local, opt-in test because the CI job already tests the image builds and the
 Redis-backed limiter independently.
 
-## Continuous delivery to ECS
+## AWS image delivery
 
-The publishing job runs only after CI succeeds on `main`, and only when the
+The AWS image-publishing path uses CodeConnections and CodeBuild:
+
+1. GitHub Actions completes continuous integration;
+2. CodeBuild reads an approved commit from GitHub;
+3. [`../buildspec.aws.yml`](../buildspec.aws.yml) builds both Docker images; and
+4. CodeBuild publishes commit-tagged images to ECR.
+
+The CodeBuild project and its least-privilege service role are defined in
+[`../infra/codebuild.yaml`](../infra/codebuild.yaml). See
+[`aws-deployment.md`](aws-deployment.md) for the console procedure.
+
+## Optional GitHub Actions delivery to ECS
+
+For AWS accounts that permit GitHub OIDC, the publishing job runs only after CI
+succeeds on `main`, and only when the
 repository variable `ENABLE_AWS_PUBLISH` is set to `true`. It builds both images
 and stores them in ECR. This can be enabled after deploying the bootstrap stack,
 before the ECS application exists.
@@ -43,7 +57,7 @@ The job:
 
 No long-lived AWS access keys are stored in GitHub.
 
-## Required GitHub configuration
+## Configuration for optional GitHub Actions delivery
 
 Create a GitHub environment named `production`. Configure its deployment
 protection rules if manual approval is desired. Create `ENABLE_AWS_PUBLISH` and
@@ -55,7 +69,7 @@ before starting their jobs. The remaining values may be repository or
 | --- | --- | --- |
 | `ENABLE_AWS_PUBLISH` | `true` | Enables image publishing after the bootstrap stack exists |
 | `ENABLE_AWS_DEPLOY` | `false` initially | Enables ECS delivery after the application stack exists |
-| `AWS_REGION` | `us-west-2` | Region containing the deployment |
+| `AWS_REGION` | `us-east-2` | Region containing the deployment |
 | `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/gatekeeper-github-deploy` | Role assumed through GitHub OIDC |
 | `ECR_GATEWAY_REPOSITORY` | `gatekeeper` | Private ECR repository for the gateway image |
 | `ECR_MOCK_REPOSITORY` | `gatekeeper-mock-backend` | Private ECR repository for the mock backend image |

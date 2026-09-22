@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Gatekeeper bootstrap resources: private ECR repositories for the gateway and
-  mock-backend container images. Image publishing is configured separately so
-  this template works with AWS Free Plan project permissions.
+  mock-backend container images. Image storage and image-publishing permissions
+  are configured separately to keep each stack narrowly scoped.
 
 Resources:
   GatewayRepository:

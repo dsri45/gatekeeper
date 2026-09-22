@@ -12,6 +12,44 @@ failure policy. Prometheus request, latency, and limiter-error metrics are
 available at `GET /metrics`. Each request also produces a structured JSON
 completion log without client identifiers or query data.
 
+The delivery workflow runs formatting, static analysis, race-enabled tests,
+binary compilation, and Docker image builds on every pull request and push to
+`main`. The AWS release architecture is defined as CloudFormation and uses
+CodeConnections, CodeBuild, ECR, ECS Fargate, an Application Load Balancer,
+ElastiCache for Valkey, and CloudWatch Logs.
+
+## AWS architecture
+
+The AWS deployment preserves the same service boundaries used by the local
+Docker Compose environment:
+
+| Local development | AWS deployment | Responsibility |
+| --- | --- | --- |
+| Docker image | Amazon ECR image | Stores a versioned application package |
+| Docker Compose service | ECS task on Fargate | Runs a container without managing a server |
+| Published host port | Application Load Balancer | Provides the public HTTP entry point |
+| Redis container | ElastiCache for Valkey | Shares rate-limit state across gateway tasks |
+| Container output | CloudWatch Logs | Centralizes runtime logs |
+| Compose network | VPC and security groups | Controls communication between services |
+
+CloudFormation creates two Gatekeeper tasks behind the load balancer. Both use
+one encrypted Valkey replication group, so a client's rate limit remains
+consistent even when successive requests reach different tasks. The tasks run
+the gateway and mock backend as separate containers, use health checks for
+traffic eligibility, and expose only the load balancer to the public internet.
+
+The infrastructure is split into three templates:
+
+1. [`infra/bootstrap.yaml`](infra/bootstrap.yaml) creates the private ECR
+   repositories.
+2. [`infra/codebuild.yaml`](infra/codebuild.yaml) creates the image builder,
+   its least-privilege IAM role, and build logs.
+3. [`infra/application.yaml`](infra/application.yaml) creates the networking,
+   load balancer, compute, shared cache, and runtime logging resources.
+
+See the [AWS deployment guide](docs/aws-deployment.md) for deployment,
+verification, and cleanup instructions.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
@@ -202,6 +240,11 @@ Saved machine-readable k6 summaries are available in
 > Built a distributed rate-limiting API gateway in Go with Redis-backed atomic
 > token buckets, sustaining 5,542 requests/second at 7.17 ms p99 latency in a
 > three-run local Docker benchmark with zero unexpected responses.
+
+> Implemented CI and container image publishing workflows with GitHub Actions,
+> Docker, AWS CodeBuild, and ECR; defined a reproducible ECS Fargate deployment
+> with CloudFormation, an Application Load Balancer, encrypted ElastiCache, and
+> centralized CloudWatch logging.
 
 The mock backend listens on `http://localhost:8081`. Its application endpoints
 are `GET /api/search` and `POST /api/upload`. Test counters are available at
