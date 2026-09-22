@@ -1,0 +1,41 @@
+version: 0.2
+
+# AWS CodeBuild reads this file after checking out the repository. It builds the
+# same two Dockerfiles used locally, tags each image with the Git commit SHA,
+# and publishes the images to the private ECR repositories.
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+      - REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-build-${CODEBUILD_BUILD_NUMBER}}"
+      - GATEWAY_IMAGE="${REGISTRY}/${GATEWAY_REPOSITORY}:${IMAGE_TAG}"
+      - MOCK_IMAGE="${REGISTRY}/${MOCK_REPOSITORY}:${IMAGE_TAG}"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+
+  build:
+    commands:
+      - docker build --tag "$GATEWAY_IMAGE" .
+      - docker build --file Dockerfile.mock-backend --tag "$MOCK_IMAGE" .
+
+  post_build:
+    commands:
+      - >-
+        if aws ecr describe-images --repository-name "$GATEWAY_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1;
+        then echo "Gateway image already exists at $GATEWAY_IMAGE";
+        else docker push "$GATEWAY_IMAGE"; fi
+      - >-
+        if aws ecr describe-images --repository-name "$MOCK_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1;
+        then echo "Mock-backend image already exists at $MOCK_IMAGE";
+        else docker push "$MOCK_IMAGE"; fi
+      - >-
+        printf '[{"name":"gatekeeper","imageUri":"%s"},{"name":"mock-backend","imageUri":"%s"}]'
+        "$GATEWAY_IMAGE" "$MOCK_IMAGE" > imagedefinitions.json
+      - >-
+        printf 'Gateway image: %s\nMock-backend image: %s\n'
+        "$GATEWAY_IMAGE" "$MOCK_IMAGE"
+
+artifacts:
+  files:
+    - imagedefinitions.json

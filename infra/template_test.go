@@ -7,10 +7,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestCloudFormationTemplatesAreWellFormedYAML(t *testing.T) {
+func TestInfrastructureYAMLFilesAreWellFormed(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"bootstrap.yaml", "application.yaml"} {
+	for _, path := range []string{
+		"bootstrap.yaml",
+		"codebuild.yaml",
+		"application.yaml",
+		"../buildspec.aws.yml",
+	} {
 		path := path
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()

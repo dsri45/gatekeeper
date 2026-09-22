@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AWS CodeBuild project that builds Gatekeeper container images from GitHub and
+  publishes immutable, commit-tagged images to the existing ECR repositories.
+
+Parameters:
+  GitHubConnectionArn:
+    Type: String
+    Description: ARN of an AVAILABLE AWS CodeConnections connection to GitHub.
+
+  GitHubOwner:
+    Type: String
+    Description: GitHub user or organization that owns the repository.
+    AllowedPattern: "[A-Za-z0-9_.-]+"
+
+  GitHubRepository:
+    Type: String
+    Default: gatekeeper
+    Description: GitHub repository name without the owner.
+    AllowedPattern: "[A-Za-z0-9_.-]+"
+
+  GitBranch:
+    Type: String
+    Default: main
+    Description: Branch CodeBuild checks out for a manual build.
+    AllowedPattern: "[A-Za-z0-9._/-]+"
+
+  GatewayRepositoryName:
+    Type: String
+    Default: gatekeeper
+    Description: Existing ECR repository for the Gatekeeper image.
+
+  MockBackendRepositoryName:
+    Type: String
+    Default: gatekeeper-mock-backend
+    Description: Existing ECR repository for the mock-backend image.
+
+Resources:
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/codebuild/gatekeeper-image-builder
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Least-privilege role used by the Gatekeeper image build.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BuildAndPublishGatekeeperImages
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "${BuildLogGroup.Arn}:*"
+              - Sid: UseGitHubConnection
+                Effect: Allow
+                Action:
+                  - codeconnections:GetConnection
+                  - codeconnections:GetConnectionToken
+                  - codeconnections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+              - Sid: LogInToECR
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PublishImages
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${GatewayRepositoryName}"
+                  - !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${MockBackendRepositoryName}"
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  ImageBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: gatekeeper-image-builder
+      Description: Build and publish Gatekeeper and mock-backend Docker images.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: GITHUB
+        Location: !Sub "https://github.com/${GitHubOwner}/${GitHubRepository}.git"
+        GitCloneDepth: 1
+        BuildSpec: buildspec.aws.yml
+        Auth:
+          Type: CODECONNECTIONS
+          Resource: !Ref GitHubConnectionArn
+        ReportBuildStatus: false
+      SourceVersion: !Ref GitBranch
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: GATEWAY_REPOSITORY
+            Type: PLAINTEXT
+            Value: !Ref GatewayRepositoryName
+          - Name: MOCK_REPOSITORY
+            Type: PLAINTEXT
+            Value: !Ref MockBackendRepositoryName
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref BuildLogGroup
+          StreamName: build
+      TimeoutInMinutes: 20
+      QueuedTimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+Outputs:
+  CodeBuildProjectName:
+    Description: CodeBuild project to run when publishing new images.
+    Value: !Ref ImageBuildProject
+
+  CodeBuildRoleArn:
+    Description: Least-privilege IAM role used by the build project.
+    Value: !GetAtt CodeBuildRole.Arn
