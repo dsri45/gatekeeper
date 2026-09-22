@@ -36,6 +36,7 @@ milliseconds, `s` for seconds, and `m` for minutes.
 ```yaml
 redis:
   address: "redis:6379"
+  tls: false
   database: 0
   operation_timeout: "100ms"
   failure_policy: "fail_open"
@@ -44,6 +45,7 @@ redis:
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `address` | Yes | None | Redis host and port |
+| `tls` | No | `false` | Encrypt the connection to Redis using TLS 1.2 or newer |
 | `database` | No | `0` | Redis logical database number |
 | `operation_timeout` | No | `100ms` | Maximum time for one rate-limit operation |
 | `failure_policy` | No | `fail_open` | Behavior when Redis cannot make a rate-limit decision |
@@ -52,6 +54,17 @@ The supported failure policies are:
 
 - `fail_open`: forward the request and report the Redis failure;
 - `fail_closed`: reject the request because its limit cannot be checked.
+
+For deployments where the Redis hostname is not known while building the
+container, set `GATEKEEPER_REDIS_ADDRESS`. When present, this environment
+variable overrides `redis.address` after the YAML file is loaded. Gatekeeper
+then normalizes and validates the final configuration before opening a Redis
+connection. Local Docker Compose does not set the variable and continues to use
+the YAML value `redis:6379`.
+
+Set `tls: true` when connecting to an ElastiCache deployment with in-transit
+encryption enabled. This is independent of HTTPS between clients and the
+gateway; it protects the separate network connection from Gatekeeper to Redis.
 
 ## Backends
 

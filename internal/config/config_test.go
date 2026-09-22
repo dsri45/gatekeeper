@@ -36,6 +36,26 @@ func TestLoadExample(t *testing.T) {
 	}
 }
 
+func TestLoadAWSConfiguration(t *testing.T) {
+	t.Setenv(RedisAddressEnvironmentVariable, "cache.internal.example:6379")
+
+	path := filepath.Join("..", "..", "config", "config.aws.yaml")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) returned an error: %v", path, err)
+	}
+
+	if cfg.Redis.Address != "cache.internal.example:6379" {
+		t.Errorf("Redis.Address = %q, want cache.internal.example:6379", cfg.Redis.Address)
+	}
+	if !cfg.Redis.TLS {
+		t.Error("Redis.TLS = false, want true")
+	}
+	if cfg.Backends["mock"].URL != "http://127.0.0.1:8081" {
+		t.Errorf("mock backend URL = %q, want loopback sidecar URL", cfg.Backends["mock"].URL)
+	}
+}
+
 func TestDecodeAppliesDefaultsAndNormalizesMethod(t *testing.T) {
 	t.Parallel()
 
@@ -130,6 +150,36 @@ func TestLoadRejectsMissingFile(t *testing.T) {
 
 	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	assertErrorContains(t, err, "open config")
+}
+
+func TestApplyEnvironmentOverridesRedisAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	lookup := func(name string) (string, bool) {
+		if name == RedisAddressEnvironmentVariable {
+			return " cache.example.internal:6379 ", true
+		}
+		return "", false
+	}
+
+	applyEnvironmentOverrides(&cfg, lookup)
+	normalize(&cfg)
+
+	if cfg.Redis.Address != "cache.example.internal:6379" {
+		t.Fatalf("Redis.Address = %q, want cache.example.internal:6379", cfg.Redis.Address)
+	}
+}
+
+func TestApplyEnvironmentOverridesLeavesRedisAddressWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfig()
+	applyEnvironmentOverrides(&cfg, func(string) (string, bool) { return "", false })
+
+	if cfg.Redis.Address != "redis:6379" {
+		t.Fatalf("Redis.Address = %q, want redis:6379", cfg.Redis.Address)
+	}
 }
 
 func TestValidateRejectsInvalidConfiguration(t *testing.T) {

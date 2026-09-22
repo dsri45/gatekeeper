@@ -26,6 +26,7 @@ WORKDIR /app
 
 COPY --from=build --chown=gatekeeper:gatekeeper /out/gatekeeper /usr/local/bin/gatekeeper
 COPY --chown=gatekeeper:gatekeeper config/config.example.yaml /app/config/config.example.yaml
+COPY --chown=gatekeeper:gatekeeper config/config.aws.yaml /app/config/config.aws.yaml
 
 USER gatekeeper
 

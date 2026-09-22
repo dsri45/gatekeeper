@@ -1,0 +1,443 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Gatekeeper on ECS Fargate with an Application Load Balancer, encrypted
+  ElastiCache for Valkey, and CloudWatch logging.
+
+Parameters:
+  GatewayImageUri:
+    Type: String
+    Description: Immutable ECR image URI for Gatekeeper, including its tag.
+
+  MockBackendImageUri:
+    Type: String
+    Description: Immutable ECR image URI for the mock backend, including its tag.
+
+  DesiredTaskCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 4
+    Description: Number of Gatekeeper tasks maintained by ECS.
+
+  CacheNodeType:
+    Type: String
+    Default: cache.t4g.micro
+    AllowedValues:
+      - cache.t4g.micro
+      - cache.t4g.small
+    Description: ElastiCache node size. The default minimizes demo cost.
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: gatekeeper
+        - Key: Project
+          Value: gatekeeper
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: gatekeeper
+        - Key: Project
+          Value: gatekeeper
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.42.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: gatekeeper-public-a
+        - Key: Project
+          Value: gatekeeper
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.42.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: gatekeeper-public-b
+        - Key: Project
+          Value: gatekeeper
+
+  CacheSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.42.10.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: gatekeeper-cache-a
+        - Key: Project
+          Value: gatekeeper
+
+  CacheSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.42.11.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: gatekeeper-cache-b
+        - Key: Project
+          Value: gatekeeper
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: gatekeeper-public
+        - Key: Project
+          Value: gatekeeper
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Accept public HTTP traffic for Gatekeeper.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP demo endpoint
+      Tags:
+        - Key: Name
+          Value: gatekeeper-load-balancer
+        - Key: Project
+          Value: gatekeeper
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Gatekeeper traffic only from the load balancer.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          Description: Gateway traffic from the ALB
+      Tags:
+        - Key: Name
+          Value: gatekeeper-tasks
+        - Key: Project
+          Value: gatekeeper
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow encrypted Redis traffic only from Gatekeeper tasks.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref TaskSecurityGroup
+          Description: Redis traffic from Gatekeeper tasks
+      Tags:
+        - Key: Name
+          Value: gatekeeper-cache
+        - Key: Project
+          Value: gatekeeper
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Isolated subnets for Gatekeeper ElastiCache.
+      SubnetIds:
+        - !Ref CacheSubnetA
+        - !Ref CacheSubnetB
+
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: Shared Gatekeeper token-bucket state.
+      Engine: valkey
+      CacheNodeType: !Ref CacheNodeType
+      NumCacheClusters: 1
+      AutomaticFailoverEnabled: false
+      MultiAZEnabled: false
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      TransitEncryptionMode: required
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds:
+        - !Ref CacheSecurityGroup
+      SnapshotRetentionLimit: 0
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  GatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/gatekeeper/gateway
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  MockBackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/gatekeeper/mock-backend
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: gatekeeper
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub gatekeeper-ecs-execution-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: gatekeeper
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: mock-backend
+          Image: !Ref MockBackendImageUri
+          Essential: true
+          ReadonlyRootFilesystem: true
+          PortMappings:
+            - ContainerPort: 8081
+              Protocol: tcp
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget -q -O - http://127.0.0.1:8081/health > /dev/null || exit 1
+            Interval: 10
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 5
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MockBackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+        - Name: gateway
+          Image: !Ref GatewayImageUri
+          Essential: true
+          ReadonlyRootFilesystem: true
+          Command:
+            - -config
+            - /app/config/config.aws.yaml
+          Environment:
+            - Name: GATEKEEPER_REDIS_ADDRESS
+              Value: !Join
+                - ":"
+                - - !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+                  - !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+          DependsOn:
+            - ContainerName: mock-backend
+              Condition: HEALTHY
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget -q -O - http://127.0.0.1:8080/health > /dev/null || exit 1
+            Interval: 10
+            Timeout: 2
+            Retries: 3
+            StartPeriod: 10
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref GatewayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: gatekeeper
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  GatewayTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: gatekeeper
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 8080
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GatewayTargetGroup
+
+  GatewayService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HTTPListener
+      - DefaultPublicRoute
+    Properties:
+      ServiceName: gatekeeper
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredTaskCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableExecuteCommand: false
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      LoadBalancers:
+        - ContainerName: gateway
+          ContainerPort: 8080
+          TargetGroupArn: !Ref GatewayTargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+          Subnets:
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetB
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+Outputs:
+  GatewayURL:
+    Description: Public HTTP endpoint for Gatekeeper.
+    Value: !Sub http://${LoadBalancer.DNSName}
+
+  ECSClusterName:
+    Description: Repository variable ECS_CLUSTER.
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Description: Repository variable ECS_SERVICE.
+    Value: !GetAtt GatewayService.Name
+
+  ECSContainerName:
+    Description: Repository variable ECS_CONTAINER_NAME.
+    Value: gateway
+
+  RedisEndpoint:
+    Description: Private TLS endpoint used by Gatekeeper tasks.
+    Value: !Join
+      - ":"
+      - - !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+        - !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port

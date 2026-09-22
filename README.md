@@ -16,6 +16,8 @@ completion log without client identifiers or query data.
 
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [CI/CD](docs/ci-cd.md)
+- [AWS deployment](docs/aws-deployment.md)
 - [Token-bucket specification](docs/rate-limiting.md)
 
 ## Requirements

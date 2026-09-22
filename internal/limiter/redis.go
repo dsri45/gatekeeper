@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -62,10 +63,15 @@ func NewRedis(cfg config.RedisConfig) (*RedisLimiter, error) {
 		return nil, errors.New("redis operation timeout must be positive")
 	}
 
-	client := redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr: cfg.Address,
 		DB:   cfg.Database,
-	})
+	}
+	if cfg.TLS {
+		options.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+
+	client := redis.NewClient(options)
 
 	return &RedisLimiter{
 		runner:    redisScriptRunner{client: client, script: redis.NewScript(tokenBucketScript)},

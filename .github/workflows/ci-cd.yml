@@ -1,0 +1,230 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:8.10.0-alpine3.23
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 1s
+          --health-retries 10
+
+    env:
+      REDIS_ADDR: 127.0.0.1:6379
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Run tests with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Build gateway binary
+        run: go build -o /tmp/gatekeeper ./cmd/gateway
+
+      - name: Build gateway container
+        run: docker build --tag gatekeeper:${{ github.sha }} .
+
+      - name: Build mock-backend container
+        run: docker build --file Dockerfile.mock-backend --tag gatekeeper-mock-backend:${{ github.sha }} .
+
+  deploy:
+    name: Deploy to Amazon ECS
+    needs:
+      - test
+      - publish
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_AWS_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+      ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          for name in AWS_REGION AWS_ROLE_ARN ECS_CLUSTER ECS_SERVICE ECS_CONTAINER_NAME; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required GitHub variable: $name"
+              exit 1
+            fi
+          done
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download current ECS task definition
+        shell: bash
+        run: |
+          task_definition_arn="$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)"
+          aws ecs describe-task-definition \
+            --task-definition "$task_definition_arn" \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+      - name: Insert image into task definition
+        id: gateway-task-definition
+        uses: aws-actions/amazon-ecs-render-task-definition@v1.9.0
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.ECS_CONTAINER_NAME }}
+          image: ${{ needs.publish.outputs.gateway-image }}
+
+      - name: Insert mock-backend image into task definition
+        id: task-definition
+        uses: aws-actions/amazon-ecs-render-task-definition@v1.9.0
+        with:
+          task-definition: ${{ steps.gateway-task-definition.outputs.task-definition }}
+          container-name: mock-backend
+          image: ${{ needs.publish.outputs.mock-image }}
+
+      - name: Deploy task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2.6.3
+        with:
+          task-definition: ${{ steps.task-definition.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+
+  publish:
+    name: Publish images to Amazon ECR
+    needs: test
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_AWS_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECR_GATEWAY_REPOSITORY: ${{ vars.ECR_GATEWAY_REPOSITORY }}
+      ECR_MOCK_REPOSITORY: ${{ vars.ECR_MOCK_REPOSITORY }}
+
+    outputs:
+      gateway-image: ${{ steps.images.outputs.gateway-image }}
+      mock-image: ${{ steps.images.outputs.mock-image }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Validate publishing configuration
+        shell: bash
+        run: |
+          for name in AWS_REGION AWS_ROLE_ARN ECR_GATEWAY_REPOSITORY ECR_MOCK_REPOSITORY; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required GitHub variable: $name"
+              exit 1
+            fi
+          done
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2.1.6
+
+      - name: Build and push immutable images
+        id: images
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        shell: bash
+        run: |
+          gateway_image="$ECR_REGISTRY/$ECR_GATEWAY_REPOSITORY:$IMAGE_TAG"
+          mock_image="$ECR_REGISTRY/$ECR_MOCK_REPOSITORY:$IMAGE_TAG"
+
+          docker build --tag "$gateway_image" .
+          docker build --file Dockerfile.mock-backend --tag "$mock_image" .
+          if aws ecr describe-images --repository-name "$ECR_GATEWAY_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "Gateway image already exists: $gateway_image"
+          else
+            docker push "$gateway_image"
+          fi
+
+          if aws ecr describe-images --repository-name "$ECR_MOCK_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "Mock-backend image already exists: $mock_image"
+          else
+            docker push "$mock_image"
+          fi
+
+          echo "gateway-image=$gateway_image" >> "$GITHUB_OUTPUT"
+          echo "mock-image=$mock_image" >> "$GITHUB_OUTPUT"
+          echo "### Published images" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Gateway: \`$gateway_image\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Mock backend: \`$mock_image\`" >> "$GITHUB_STEP_SUMMARY"

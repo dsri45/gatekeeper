@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"reflect"
 	"strings"
@@ -10,6 +11,28 @@ import (
 
 	"github.com/dsri45/gatekeeper/internal/config"
 )
+
+func TestNewRedisConfiguresTLS(t *testing.T) {
+	t.Parallel()
+
+	redisLimiter, err := NewRedis(config.RedisConfig{
+		Address:          "cache.example.internal:6379",
+		TLS:              true,
+		OperationTimeout: config.NewDuration(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("NewRedis returned an error: %v", err)
+	}
+	t.Cleanup(func() { _ = redisLimiter.Close() })
+
+	tlsConfig := redisLimiter.client.Options().TLSConfig
+	if tlsConfig == nil {
+		t.Fatal("TLSConfig is nil")
+	}
+	if tlsConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("TLS MinVersion = %d, want TLS 1.2", tlsConfig.MinVersion)
+	}
+}
 
 type fakeScriptRunner struct {
 	result interface{}

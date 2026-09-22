@@ -7,6 +7,9 @@ const (
 	FailurePolicyClosed = "fail_closed"
 )
 
+// RedisAddressEnvironmentVariable overrides the YAML Redis address at runtime.
+const RedisAddressEnvironmentVariable = "GATEKEEPER_REDIS_ADDRESS"
+
 const (
 	defaultServerAddress      = ":8080"
 	defaultReadHeaderTimeout  = 5 * time.Second
@@ -40,6 +43,7 @@ type ServerConfig struct {
 // RedisConfig controls the connection to the shared rate-limit store.
 type RedisConfig struct {
 	Address          string   `yaml:"address"`
+	TLS              bool     `yaml:"tls"`
 	Database         int      `yaml:"database"`
 	OperationTimeout Duration `yaml:"operation_timeout"`
 	FailurePolicy    string   `yaml:"failure_policy"`

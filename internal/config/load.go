@@ -22,8 +22,19 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("load config %q: %w", path, err)
 	}
+	applyEnvironmentOverrides(&cfg, os.LookupEnv)
+	normalize(&cfg)
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("load config %q after environment overrides: validate: %w", path, err)
+	}
 
 	return cfg, nil
+}
+
+func applyEnvironmentOverrides(cfg *Config, lookup func(string) (string, bool)) {
+	if address, exists := lookup(RedisAddressEnvironmentVariable); exists {
+		cfg.Redis.Address = address
+	}
 }
 
 func decode(reader io.Reader) (Config, error) {

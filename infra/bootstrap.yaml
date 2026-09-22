@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Gatekeeper bootstrap resources: private ECR repositories and a GitHub Actions
+  OIDC role for publishing images and deploying to ECS.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub user or organization that owns the repository.
+    AllowedPattern: "[A-Za-z0-9_.-]+"
+
+  GitHubRepository:
+    Type: String
+    Default: gatekeeper
+    Description: GitHub repository name without the owner.
+    AllowedPattern: "[A-Za-z0-9_.-]+"
+
+  ExistingGitHubOIDCProviderArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN of an existing token.actions.githubusercontent.com IAM OIDC provider.
+      Leave empty to create one in this stack.
+
+Conditions:
+  CreateGitHubOIDCProvider: !Equals [!Ref ExistingGitHubOIDCProviderArn, ""]
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateGitHubOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  GatewayRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: gatekeeper
+      ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the 20 newest images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  MockBackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: gatekeeper-mock-backend
+      ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the 20 newest images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+  GitHubDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Short-lived role assumed by Gatekeeper GitHub Actions workflows.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOIDCProvider
+                - !Ref GitHubOIDCProvider
+                - !Ref ExistingGitHubOIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOwner}/${GitHubRepository}:*"
+                  - !Sub "repo:${GitHubOwner}@*/${GitHubRepository}@*:*"
+      Policies:
+        - PolicyName: PublishGatekeeperImages
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource:
+                  - !GetAtt GatewayRepository.Arn
+                  - !GetAtt MockBackendRepository.Arn
+        - PolicyName: DeployGatekeeperECSService
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                  - ecs:RegisterTaskDefinition
+                  - ecs:TagResource
+                  - ecs:UpdateService
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/gatekeeper-*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: gatekeeper
+
+Outputs:
+  GatewayRepositoryName:
+    Description: Repository variable ECR_GATEWAY_REPOSITORY.
+    Value: !Ref GatewayRepository
+
+  MockBackendRepositoryName:
+    Description: Repository variable ECR_MOCK_REPOSITORY.
+    Value: !Ref MockBackendRepository
+
+  GitHubDeploymentRoleArn:
+    Description: Repository variable AWS_ROLE_ARN.
+    Value: !GetAtt GitHubDeploymentRole.Arn
+
+  GitHubOIDCProviderArn:
+    Description: OIDC provider created or reused by this stack.
+    Value: !If
+      - CreateGitHubOIDCProvider
+      - !Ref GitHubOIDCProvider
+      - !Ref ExistingGitHubOIDCProviderArn
