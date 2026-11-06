@@ -6,7 +6,7 @@ proxying allowed HTTP requests to backend services.
 
 ## Status
 
-The gateway now enforces atomic Redis-backed token buckets, supports per-client
+The gateway enforces atomic Redis-backed token buckets, supports per-client
 overrides, returns `429 Too Many Requests`, and applies a configurable Redis
 failure policy. Prometheus request, latency, and limiter-error metrics are
 available at `GET /metrics`. Each request also produces a structured JSON
@@ -234,18 +234,3 @@ the token check and update atomically under concurrent access.
 
 Saved machine-readable k6 summaries are available in
 [`loadtest/results`](loadtest/results).
-
-## Resume bullet
-
-> Built a distributed rate-limiting API gateway in Go with Redis-backed atomic
-> token buckets, sustaining 5,542 requests/second at 7.17 ms p99 latency in a
-> three-run local Docker benchmark with zero unexpected responses.
-
-> Implemented CI and container image publishing workflows with GitHub Actions,
-> Docker, AWS CodeBuild, and ECR; defined a reproducible ECS Fargate deployment
-> with CloudFormation, an Application Load Balancer, encrypted ElastiCache, and
-> centralized CloudWatch logging.
-
-The mock backend listens on `http://localhost:8081`. Its application endpoints
-are `GET /api/search` and `POST /api/upload`. Test counters are available at
-`GET /_mock/stats` and can be cleared with `POST /_mock/reset`.
